@@ -182,10 +182,11 @@ Trace a camera frame from sensor to every consumer:
 - Every transformation: what it computes, input→output format
 - GPU shader passes: what each shader does, not just that it exists
 - Fan-out points to multiple consumers (preview, C++ sinks, capture)
-- Back-pressure: what happens when a consumer is slower than frame production
+- Back-pressure: what happens when a consumer is slower than frame production (frame dropping? queuing? blocking?)
 - Memory ownership at each handoff
 - Zero-copy vs copy paths (which transfers involve memcpy, which don't)
-- Mermaid diagram showing the complete pipeline
+- RESULTS RETURN PATH: how do ML/CV results flow BACK from C++ consumers to the UI? (e.g., inference results, detections, measurements). Document the upward data flow, not just the downward frame delivery.
+- Mermaid diagram showing the complete pipeline (both directions: frames down, results up)
 
 ### control-plane.md — API Dispatch
 For each Pigeon HostApi method, trace:

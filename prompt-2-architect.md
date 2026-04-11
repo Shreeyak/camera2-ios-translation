@@ -38,14 +38,61 @@ Documentation directory structure:
 Read the MANIFEST first, then follow its recommended read order.
 </context>
 
+<reference-architecture>
+The iOS app should follow the "Sandwich" architecture — an industry-standard pattern for high-performance camera systems with C++ backends:
+
+TOP LAYER — SwiftUI (Brain & Skin)
+- Manages UI overlays, buttons, camera control panels
+- Observes state via a ViewModel / @Observable object
+- NEVER touches camera buffers or Metal textures directly
+
+MIDDLE LAYER — UIKit Wrapper (Bridge)
+- UIViewRepresentable hosting a custom MTKView
+- Bridges SwiftUI's declarative world to the imperative Metal pipeline
+- Coordinates between the SwiftUI state and the engine
+
+BOTTOM LAYER — ObjC++ & Metal (Engine)
+- CameraEngine class (ObjC++) owns the AVCaptureSession and Metal device
+- AVCaptureVideoDataOutput delegate lives here
+- Manages MTLCommandQueue and memory handoff to C++ ML/CV layer
+- Holds references to C++ consumer objects
+
+Key architectural constraints from this pattern:
+
+1. ZERO-COPY FRAME PIPELINE:
+   - AVFoundation delivers CMSampleBuffer containing CVPixelBuffer
+   - Use CVMetalTextureCacheCreateTextureFromImage to create a Metal texture pointing directly to existing camera memory — no CPU copy
+   - After GPU processing, pass the CVPixelBuffer or MTLTexture pointer to ObjC++ layer for C++ handoff — also zero-copy
+
+2. DO NOT USE AVCaptureVideoPreviewLayer for the final preview:
+   Since frames go through GPU processing, the preview must show the Metal pipeline OUTPUT, not the raw camera feed. Draw directly to MTKView instead. (Phase 1 may use AVCaptureVideoPreviewLayer temporarily as a scaffold, but Phase 2 MUST replace it with MTKView.)
+
+3. THREE-THREAD MODEL:
+   - Main Thread: SwiftUI UI updates ONLY
+   - Camera Thread: AVCaptureSession delegate callbacks (frame delivery)
+   - Compute Thread: Metal command buffer submission and C++ ML processing
+   These must be strictly isolated. Cross-thread communication via well-defined handoff points.
+
+4. FRAME DROPPING STRATEGY for back-pressure:
+   If the C++ ML/CV layer is still processing the previous frame when a new camera frame arrives, DROP the new frame immediately. Do NOT queue frames — queuing causes memory exhaustion and latency spikes. The camera runs at 30/60fps; if ML runs at 15fps, that's fine — just drop the frames it can't handle.
+
+5. MEMORY RETENTION for async C++ processing:
+   If C++ processes frames asynchronously (off the camera callback thread), you MUST explicitly retain the CVPixelBuffer (via CVBufferRetain/CVBufferRelease or CFRetain/CFRelease) to prevent the camera from recycling the buffer before C++ finishes. This is an iOS-specific concern — the Android equivalent is handled differently via ImageReader's acquireLatestImage/close pattern.
+
+6. RESULTS RETURN PATH:
+   ML/CV results must flow BACK from C++ through the ViewModel to update SwiftUI overlays (e.g., bounding boxes, classifications, measurements). Design this upward data flow explicitly — it's not just frames going down.
+</reference-architecture>
+
 <constraints>
 - Target: iOS 26+, Swift 6, Metal 3
 - GPU: Metal compute and render pipelines (no OpenGL, no Core Image unless justified)
-- UI: SwiftUI primary, UIKit via UIViewRepresentable only where SwiftUI lacks capability (AVCaptureVideoPreviewLayer, MTKView)
+- UI: SwiftUI primary, UIKit via UIViewRepresentable only where SwiftUI lacks capability (MTKView for processed preview, AVCaptureVideoPreviewLayer ONLY as a temporary Phase 1 scaffold)
 - C++ interop: ObjC++ bridging layer (Swift → ObjC++ → C++). Use Objective-C ONLY for this bridge and for Apple frameworks that lack Swift-native API.
-- Concurrency: Swift structured concurrency (actors, async/await, TaskGroups). Do NOT default to GCD unless actors are inappropriate for a specific case — justify the choice.
+- Concurrency: Swift structured concurrency (actors, async/await, TaskGroups) for state management. The camera callback and Metal compute paths may need dedicated serial DispatchQueues for performance — justify each choice (actor vs GCD queue).
 - Error handling from day one — not bolted on later. The Android codebase has a stall watchdog, RECOVERING state, and recording teardown guards. The iOS design must handle equivalent failure modes from Phase 1.
 - Camera controls from day one — not added as an afterthought. Manual control of camera characteristics is half the app's purpose.
+- Zero-copy throughout: CVPixelBuffer → MTLTexture → C++ must avoid CPU copies. Design the memory ownership chain explicitly.
+- Frame dropping, not queuing, when consumers are slow.
 </constraints>
 
 <deliverables>
@@ -55,11 +102,12 @@ DELIVERABLE 1 — iOS ARCHITECTURE DESIGN
 Write design/01-architecture.md:
 
 ### Module/Layer Diagram (Mermaid)
-- App layer (SwiftUI views, view models or observable state)
-- Camera engine layer (AVCaptureSession, device management)
-- Metal processing layer (compute/render pipelines, texture management)
-- C++ bridge layer (ObjC++ wrappers)
-- How layers communicate (protocols, AsyncStream, delegate, Combine)
+Follow the Sandwich architecture from the reference architecture section:
+- TOP: App layer (SwiftUI views, @Observable ViewModel)
+- MIDDLE: UIKit bridge (UIViewRepresentable + MTKView)
+- BOTTOM: CameraEngine (ObjC++ class owning AVCaptureSession, Metal device, C++ references)
+- Show both data flows: frames DOWN (camera → Metal → C++ sinks) and results UP (C++ → ViewModel → SwiftUI)
+- How layers communicate (protocols, AsyncStream, delegate, callbacks)
 
 ### Concurrency Architecture
 For each Android threading construct documented in the audit, design the Swift equivalent:
@@ -95,9 +143,20 @@ For each Android threading construct documented in the audit, design the Swift e
 
 ### C++ Integration Design
 - ObjC++ bridge pattern: Swift → ObjC++ wrapper → C++ consumer
+- CameraEngine (ObjC++) holds references to C++ ML/CV objects and calls them directly (e.g., mlProvider->processFrame(pixelBuffer))
 - Memory ownership: who allocates pixel buffers, who frees them, when
+- CVPixelBuffer retention: if C++ processes asynchronously, must CVBufferRetain before handoff and CVBufferRelease after processing. Design this explicitly.
 - Threading contract: which queue delivers frames to C++, synchronous vs async
+- Frame dropping: if C++ is busy when a new frame arrives, drop it — do not queue
 - Which parts of the existing C++ are portable vs need Android-specific code removed
+
+### Results Return Path
+Design how ML/CV results flow BACK from C++ to the UI:
+- How C++ results (detections, classifications, measurements) are communicated to ObjC++
+- How ObjC++ forwards results to the Swift ViewModel (callback, delegate, or observation)
+- How the ViewModel updates SwiftUI overlays (@Observable, AsyncStream, or Combine)
+- Threading: results originate on the compute thread but UI updates must be on @MainActor
+- Latency: should results be throttled to avoid UI churn? (e.g., cap at 30 updates/sec)
 
 ### Camera Controls Design
 - For each camera characteristic in the audit (focus, AWB, AE, ISO, exposure, zoom, etc.):
@@ -116,7 +175,7 @@ Five phases. Each is a self-contained milestone that produces a testable app. Th
 Scope:
 - SwiftUI app scaffold with the concurrency architecture (actors, state machine) from day one
 - AVCaptureSession setup: open camera, configure, start/stop
-- Raw preview display (AVCaptureVideoPreviewLayer via UIViewRepresentable)
+- Raw preview display (AVCaptureVideoPreviewLayer via UIViewRepresentable — TEMPORARY scaffold, replaced by MTKView in Phase 2)
 - Camera characteristic controls: focus, AWB, AE, ISO, exposure, zoom — wired to real AVCaptureDevice APIs
 - State machine with all states and transitions (even if some transitions aren't exercised yet)
 - Error detection and basic recovery (session interruption handler)
@@ -158,11 +217,13 @@ Files to create:
 ### Phase 3 — C++ Sink Integration
 Scope:
 - ObjC++ bridge layer: Swift → ObjC++ → C++ consumer interface
+- CameraEngine (ObjC++) owns C++ consumer references and calls processFrame() directly
 - Processed frame delivery to C++ sinks
-- Memory ownership implementation (from design/01-architecture.md)
-- Threading contract: frames delivered on designated queue
+- Memory ownership implementation: CVBufferRetain before async handoff, CVBufferRelease after C++ finishes
+- Threading contract: frames delivered on designated compute queue
+- Frame dropping: if C++ is busy, drop the new frame — do not queue
 - Multiple sink support (ML consumer + CV consumer)
-- Back-pressure handling when sinks are slow
+- Results return path: C++ results → ObjC++ → ViewModel → SwiftUI overlay
 
 Key decision (resolve from design):
 - Do sinks get MTLTexture refs or CPU-readback buffers?
@@ -170,9 +231,10 @@ Key decision (resolve from design):
 
 Testable acceptance:
 - C++ test consumer receives frames at expected rate
-- Memory is stable (no leaks — profile with Instruments Allocations)
-- Slow consumer doesn't stall the pipeline or drop preview frames
+- Memory is stable under sustained operation (no leaks — profile with Instruments Allocations)
+- Slow consumer causes frame drops (not stalls or memory growth)
 - Frame format received by C++ matches expected specification
+- ML/CV results appear in SwiftUI overlay (if applicable)
 
 Files to create:
 [List ObjC++ bridge files, C++ consumer interface]
