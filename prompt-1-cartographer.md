@@ -22,6 +22,18 @@ This app has two core missions:
 Both missions must be fully documented. The downstream agent needs to understand them to make correct design decisions.
 </objective>
 
+<output-priority>
+The downstream agent will read your output in this order. Structure your work accordingly:
+
+1. ENTRY POINT: output/06-architecture-brief.md — Read first. Must be self-contained enough to start working from. Contains the "Gotchas" section and platform mapping.
+2. CONTRACT: output/02-api-contract.md — The formal interface the iOS app must implement.
+3. MAPS: output/04-architecture-maps/ — Deep-dive into specific concerns as needed.
+4. REFERENCE: output/05-translation-cards/ — Component-level detail, consulted when implementing specific components.
+5. CONTEXT: output/00-project-overview.md, output/01-ui-design.md, output/03-inventory/ — Background material.
+
+The brief + contract + data-plane map should be sufficient for the downstream agent to START working. Everything else is reference material it dips into per-component.
+</output-priority>
+
 <context>
 The codebase has been pre-packed using repomix into layer-specific XML files in the packed/ directory. Read these files for code inventory and structure. Use the original source (via git commands, Grep, Read) only for targeted follow-ups: git history, specific edge-case investigation, or verifying details.
 
@@ -65,10 +77,12 @@ These are hard rules. Not suggestions — violations cause real failures.
 Table format:
 | Decision | Chosen approach | Rejected alternative | Why | Source |
 Source = git commit hash, code comment, or docs/plans/ reference.
-Use git log on the original repo to find WHY changes were made:
-- `git -C /Users/shrek/work/cambrian/camera2_flutter_demo log -p --follow <file>` for file history
-- `git -C /Users/shrek/work/cambrian/camera2_flutter_demo log --all --grep="<keyword>"` for topic search
-- `git -C /Users/shrek/work/cambrian/camera2_flutter_demo blame <file>` for specific lines
+
+Git archaeology strategy — avoid streaming full diffs:
+- Start with `git -C /Users/shrek/work/cambrian/camera2_flutter_demo log --oneline --follow <file>` to find relevant commits
+- Then `git -C /Users/shrek/work/cambrian/camera2_flutter_demo show <hash>` selectively on promising commits
+- Use `git -C /Users/shrek/work/cambrian/camera2_flutter_demo log --all --grep="<keyword>" --oneline` for topic search
+- Use `git -C /Users/shrek/work/cambrian/camera2_flutter_demo blame -L <start>,<end> <file>` for specific line ranges
 Read inline code comments carefully — they explain edge cases and rationale.
 
 ## L4: Edge Cases & Guards
@@ -103,14 +117,16 @@ Write output/00-project-overview.md:
 PHASE 1 — UI DESIGN FROM SCREENSHOTS
 
 Read every image file in screenshots/.
+For interaction logic and conditional behavior that screenshots cannot show (e.g., "this slider appears only when AE is in manual mode"), check the Dart source in packed/dart-app-compressed.xml or the Pigeon API definitions.
 
 Write output/01-ui-design.md:
 - Each screen/state shown: what it displays, what controls are visible
 - Interactive elements: what each button/slider/toggle triggers
 - Camera parameters visible in the UI (focus controls, AWB, exposure, etc.)
 - UX patterns: tap vs long-press, swipe gestures, state indicators
+- Conditional visibility: which controls appear/disappear based on state (check Dart source for this)
 - Layout notes: what the downstream agent should replicate vs what is Flutter chrome
-- Any missing states that aren't screenshotted (note as gaps)
+- Any missing states that aren't screenshotted — infer from the Pigeon API contract and state machine, flag with "INFERRED — not screenshotted" so the user can verify
 
 PHASE 2 — PIGEON API CONTRACT
 
@@ -136,6 +152,11 @@ Write output/02-api-contract.md:
   - Methods for still image capture and video recording
   - Callbacks for capture completion, errors
 
+### Configuration & Settings
+  - How settings are defaulted and validated
+  - Whether any settings persist across sessions or are reset on camera open
+  - Default values and where they are defined
+
 ### Data Classes
   - Every data class with all fields, types, and nullability
   - What each class represents
@@ -148,31 +169,24 @@ For each method, note:
 - Called per-frame (hot path) vs called rarely (configuration)
 - Error return paths
 
-PHASE 3 — CODE INVENTORY
+PHASE 3 — CODE INVENTORY (LIGHTWEIGHT)
 
-Read the repomix packed files for each layer. Produce an inventory table per layer:
-| File path | Class/Struct/Enum | Visibility | Key methods (name + brief purpose) | Threading context |
+Read the repomix packed files for each layer. Produce a LIGHTWEIGHT index — not exhaustive method-level tables. The downstream agent needs to know what exists and where, not every method signature. Translation cards (Phase 5) cover method-level detail for important components.
+
+Per-layer format:
+| File path | Class/Struct/Enum | Responsibility (one line) | Threading context | Notes |
 
 Write to output/03-inventory/:
 - dart-plugin-api.md — from packed/dart-plugin-compressed.xml
-- kotlin-native.md — from packed/kotlin-full.xml
-- cpp-native.md — from packed/cpp-full.xml
+- kotlin-native.md — from packed/kotlin-full.xml (note which classes implement Pigeon HostApi, which call FlutterApi, which handler each class primarily runs on)
+- cpp-native.md — from packed/cpp-full.xml (note JNI entry points, Android-specific vs portable code)
 - gpu-shaders.md — from packed/shaders-full.xml
 - build-config.md — from packed/build-config.xml (dependencies, SDK versions, native libs, linking)
-
-For the Kotlin layer, also note:
-- Which classes implement Pigeon HostApi interfaces
-- Which classes call Pigeon FlutterApi methods
-- Handler thread annotations (which methods run on which handler)
-
-For C++, also note:
-- JNI entry points (functions callable from Kotlin)
-- Any Android-specific includes (AHardwareBuffer, android/ headers) vs portable code
-- OpenCV or other library dependencies
 
 PHASE 4 — ARCHITECTURAL PLANE MAPS
 
 Six maps, each using L1-L5 format with Mermaid diagrams AND prose.
+Mermaid diagrams: keep under ~12 nodes per diagram. If more complex, split into sub-diagrams with labeled handoff points between them.
 
 Write to output/04-architecture-maps/:
 
@@ -186,6 +200,7 @@ Trace a camera frame from sensor to every consumer:
 - Memory ownership at each handoff
 - Zero-copy vs copy paths (which transfers involve memcpy, which don't)
 - RESULTS RETURN PATH: how do ML/CV results flow BACK from C++ consumers to the UI? (e.g., inference results, detections, measurements). Document the upward data flow, not just the downward frame delivery.
+- Performance budget: frame rate targets, any known timing constraints per pipeline stage, where latency budget is spent
 - Mermaid diagram showing the complete pipeline (both directions: frames down, results up)
 
 ### control-plane.md — API Dispatch
@@ -222,7 +237,7 @@ This codebase has extensive threading guards. Document exhaustively:
 - Deadlock risks: what combinations of locks/posts would deadlock, how they're avoided
 - Callback chains: which thread initiates, which thread receives, any thread-hopping patterns
 - The backgroundHandler/mainHandler contract and every method that follows it
-- Mermaid diagram showing thread interactions
+- Mermaid diagram showing thread interactions (split into sub-diagrams if >12 nodes)
 
 ### error-recovery.md — Error & Recovery
 - Every error origination point (Camera2 errors, GPU errors, IO errors, timeouts)
@@ -236,20 +251,20 @@ This codebase has extensive threading guards. Document exhaustively:
 
 PHASE 5 — COMPONENT TRANSLATION CARDS
 
-For each component, produce L1-L5 documentation PLUS a summary card header.
+For each component, produce documentation focused on what the downstream agent needs to implement it. For cross-cutting concerns (threading, error handling, state management), REFERENCE the architecture maps rather than repeating them. Example: "Threading: see threading-model.md §backgroundHandler contract" rather than re-documenting the threading model.
 
 Write to output/05-translation-cards/:
 - camera-lifecycle.md — Device open/close/configure, session management
 - preview-rendering.md — Preview surface setup and frame display
 - gpu-pipeline.md — OpenGL ES processing pipeline, EGL context, surface management
 - shaders.md — Each GLSL shader program: what it computes, input/output formats, uniform parameters
-- cpp-sinks.md — C++ consumer interface, JNI bridge, memory handoff, what's portable vs Android-specific
+- cpp-sinks.md — C++ consumer interface, JNI bridge, memory handoff. Include a PORTABILITY MATRIX: what C++ code compiles as-is on iOS, what has Android-specific dependencies (JNI, AHardwareBuffer, android/ headers), and what assumptions the C++ layer makes about buffer formats, memory alignment, and threading model.
 - image-capture.md — Still image capture flow, EXIF handling, output formats
 - video-recording.md — MediaRecorder/video recording, start/stop, mid-recording edge cases
 - format-conversion.md — YUV↔RGB, color space transforms, where they happen, exact matrix/coefficients if specified
 - camera-controls.md — Every controllable characteristic: focus, AWB, AE, ISO, exposure, zoom. For each: API method, parameter type, valid ranges, how it maps to Camera2 CaptureRequest keys, any interaction constraints (e.g., "setting manual exposure disables AE")
-- state-management.md — State enum, state notification pattern, who writes state, who reads it
-- error-handling.md — Error types, detection, recovery, stall watchdog details
+- state-management.md — State enum, state notification pattern, who writes state, who reads it. Reference state-machine.md for the formal diagram.
+- error-handling.md — Error types, detection, recovery. Reference error-recovery.md for the system-wide flow.
 
 Each card format:
 ```
@@ -258,6 +273,7 @@ Each card format:
 **Pigeon API methods:** [cross-reference to Phase 2]
 **Depends on:** [other components]
 **Depended on by:** [other components]
+**Related architecture maps:** [which maps in 04-architecture-maps/ cover cross-cutting concerns for this component]
 
 ### L1: Purpose
 [...]
@@ -280,35 +296,65 @@ Each card format:
 
 PHASE 6 — ARCHITECTURE BRIEF
 
-Write output/06-architecture-brief.md (under 2000 words):
+Write output/06-architecture-brief.md. This is the PRIMARY ENTRY POINT for the downstream agent — it must be self-contained enough to start working from.
+
+Structure (up to 3000 words):
+
+### System Overview
 - The two missions and how the architecture serves them
 - System topology: the shape of the pipeline (camera → GPU → fan-out)
-- The 5 hardest aspects of this codebase (reference specific L4 entries)
-- Platform mapping table with caveats:
-  | Android | iOS analog | Caveats |
-  | Camera2 | AVCaptureSession | Threading model is fundamentally different |
-  | OpenGL ES | Metal | Shader language translation needed |
-  | Handler threads | GCD/actors | Not a 1:1 swap — concurrency redesign |
-  | JNI/NDK | ObjC++/Swift-C++ | Thinner bridge, different memory model |
-  | SurfaceTexture | CVMetalTextureCache | Zero-copy path exists on both |
-- What can be directly translated vs what needs redesign
-- Key open questions for the iOS architect
+- Mermaid diagram of the high-level architecture
+
+### Gotchas (5-10 bullets)
+Higher-level than L4 edge cases. Things like:
+- "Camera2 session reconfiguration drops frames for ~200ms, so we avoid it at runtime"
+- "The stall watchdog threshold was tuned empirically and is device-dependent"
+- "Recording teardown must happen on backgroundHandler or MediaRecorder crashes"
+These save the iOS architect from repeating your hard-won mistakes.
+
+### Platform Mapping (bidirectional)
+| Android | iOS Analog | Caveats | iOS has no equivalent | iOS has a better primitive |
+| Camera2 | AVCaptureSession | Threading model fundamentally different | | |
+| OpenGL ES | Metal | Shader language translation needed | | |
+| Handler threads | GCD/actors | Not a 1:1 swap — concurrency redesign | | |
+| JNI/NDK | ObjC++/Swift-C++ | Thinner bridge, different memory model | | |
+| SurfaceTexture | CVMetalTextureCache | Zero-copy path on both | | |
+Fill in the "no equivalent" and "better primitive" columns — this is where real architectural decisions live.
+
+### Performance Budget
+- Frame rate targets
+- Known timing constraints per pipeline stage
+- Where the latency budget is spent
+- Any measured values from the Android implementation
+
+### What Translates Directly vs. Needs Redesign
+- Components where the API mapping is straightforward
+- Components where the iOS approach is fundamentally different
+- The C++ portability situation (summary — details in cpp-sinks.md)
+
+### Open Questions
+- Decisions that need human input
+- Ambiguities that couldn't be resolved from code/git alone
 - Note: Claude conversation history contains additional design rationale (to be provided separately)
 
 PHASE 7 — MANIFEST
 
 Write output/MANIFEST.md:
 - Every file with one-line description
-- Recommended read order for the downstream agent (numbered)
+- Recommended read order (numbered, matching the output-priority hierarchy)
 - Component ID cross-reference (same name across inventory → maps → cards)
+- Total estimated word count per file (so the downstream agent knows the reading budget)
 </phases>
 
 <tool-usage>
 Primary reading: Use Read to read the repomix packed files in packed/
 Targeted follow-up: Use Read, Grep on original source at /Users/shrek/work/cambrian/camera2_flutter_demo
 Git history: Use Bash with git -C /Users/shrek/work/cambrian/camera2_flutter_demo <command>
+  - Always start with --oneline to find relevant commits, then git show <hash> selectively
+  - Avoid git log -p on large files — it streams full diffs and burns tokens
 Screenshots: Use Read to view image files in screenshots/
 Dart LSP: Use mcp__dart__ tools for symbol resolution if needed for Dart layer
+Dart source for UI logic: Read packed/dart-app-compressed.xml for conditional visibility and interaction logic that screenshots cannot show
 Write output: Write all files to output/ directory
 </tool-usage>
 
@@ -325,18 +371,19 @@ Write output: Write all files to output/ directory
 - Do NOT write files outside output/
 - Do NOT run the app, build, or test
 - Do NOT install dependencies or make commits
-- Do NOT read Dart widget code to understand UI — use screenshots
 - Do NOT write prose where a table or Mermaid diagram is more precise
 - Do NOT use one-line descriptions for L4 edge cases
 - Do NOT skip components because they seem simple
+- Do NOT duplicate cross-cutting concerns across translation cards — reference the architecture maps instead
 </forbidden-actions>
 
 <stop-conditions>
-Pause and ask when:
-- A threading guard exists but you cannot find WHY from code comments or git log
-- A file exceeds 500 lines — verify completeness with Grep before proceeding
-- An undocumented native dependency appears
-- You're unsure whether an edge case is domain-level or Android-specific
+Use NEEDS INVESTIGATION for most unknowns. Only pause and ask when:
+- A genuinely blocking ambiguity exists — you cannot proceed without the answer AND it affects multiple downstream components
+- An undocumented native dependency appears that may require user action
+- You discover a component that contradicts the architecture docs in reference/
+
+For non-blocking unknowns (can't find WHY for a specific guard, unsure if an edge case is domain-level or Android-specific), mark as "NEEDS INVESTIGATION — [reason]" and continue. The user will review these after the audit.
 </stop-conditions>
 
 <checkpoints>
@@ -345,15 +392,19 @@ After each phase:
 
 After Phase 4 and Phase 5: re-read output/00-project-overview.md and update if your understanding has changed.
 Final: verify MANIFEST.md lists every file in output/.
+
+When verifying completeness of a source file: if a Kotlin or C++ source file is large (>500 lines in the original repo), use Grep to verify you haven't missed classes or methods before moving on.
 </checkpoints>
 
 <quality-gates>
-- Every class in inventory has at least one method listed
-- Every architecture map has a Mermaid diagram AND prose
-- Every translation card has all L1-L5 sections filled (use "NEEDS INVESTIGATION — [reason]" if unknown)
+- Every class in inventory has a responsibility description
+- Every architecture map has Mermaid diagram(s) (max ~12 nodes each) AND prose
+- Every translation card has all L1-L5 sections filled (use "NEEDS INVESTIGATION — [reason]" if unknown, never blank)
 - Every L4 entry has: trigger, failure mode, timing values with rationale, domain vs platform
-- Cross-references use consistent component names
-- Every L3 entry has a source (commit hash, code comment, or doc reference)
-- MANIFEST read-order is logical (overview → contract → maps → cards → brief)
+- Cross-references use consistent component names across all files
+- Every L3 entry has a source (commit hash, code comment, or doc reference) — if no source found, mark "RATIONALE NOT FOUND IN CODE/GIT"
+- Translation cards reference architecture maps for cross-cutting concerns, not duplicate them
+- MANIFEST read-order matches the output-priority hierarchy
+- Architecture brief is self-contained enough that the downstream agent can start working from it alone
 </quality-gates>
 ```
