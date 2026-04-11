@@ -87,17 +87,34 @@ Prefer direct interop. Fall back to ObjC++ only if the C++ code uses unsupported
 
 ## Sendable and Actor Isolation
 
-CVPixelBuffer (CoreVideo ObjC type) is **not inherently Sendable**. Swift 6 enforces Sendable at compile time for types crossing actor boundaries. When passing frame buffers between:
-- Camera serial queue → @MLProcessor global actor
-- @MLProcessor → Metal renderer (nonisolated)
-- Any actor → @MainActor
+CVPixelBuffer (CoreFoundation type) is **not inherently Sendable**. Swift 6 enforces Sendable at compile time for types crossing actor boundaries.
 
-You must handle Sendable conformance explicitly:
-- **@unchecked Sendable wrapper**: Wrap CVPixelBuffer in a struct that conforms to `@unchecked Sendable`. You take responsibility for thread safety.
-- **nonisolated handoff**: Use nonisolated methods at boundary points to avoid crossing isolation domains.
-- **Raw pointer passing**: `UnsafeRawPointer` is Sendable. Pass pointers with explicit retain/release.
+**Recommended approach: keep buffers on one queue, send only results across boundaries.**
 
-Design this strategy early — the compiler will reject code that violates isolation boundaries.
+The CV/ML pipeline uses OpenCV (same as the Android project). The natural pattern is:
+```
+Camera serial queue:
+  CVPixelBuffer → CVPixelBufferLockBaseAddress → CVPixelBufferGetBaseAddress
+  → cv::Mat wrapping raw pointer (zero-copy)
+  → OpenCV processing
+  → results (plain Swift structs — inherently Sendable)
+  → CVPixelBufferUnlockBaseAddress
+
+Results cross to @MainActor:
+  DetectionResult { x, y, w, h, confidence, label }  // Sendable struct
+```
+
+CVPixelBuffer and cv::Mat never cross actor boundaries. Only lightweight result structs do. This avoids the Sendable problem entirely.
+
+## OpenCV on iOS
+
+The Android project already uses OpenCV. The C++ CV code should be highly portable — OpenCV abstracts platform differences and cv::Mat works identically on both platforms.
+
+**Integration path:**
+- OpenCV iOS framework available via CocoaPods, SPM, or manual xcframework
+- Bridge: Swift (or ObjC++) calls C++ functions that accept raw pixel pointers
+- Zero-copy: `CVPixelBufferGetBaseAddress()` → `cv::Mat(height, width, CV_8UC4, baseAddress, bytesPerRow)`
+- The JNI entry points from Android need to be replaced with Swift-callable C++ functions, but the core CV logic is portable
 
 ## Results Return Path
 

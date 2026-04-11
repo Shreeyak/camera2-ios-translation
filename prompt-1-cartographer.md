@@ -258,7 +258,7 @@ Write to output/05-translation-cards/:
 - preview-rendering.md — Preview surface setup and frame display
 - gpu-pipeline.md — OpenGL ES processing pipeline, EGL context, surface management
 - shaders.md — Each GLSL shader program: what it computes, input/output formats, uniform parameters
-- cpp-sinks.md — C++ consumer interface, JNI bridge, memory handoff. Include a PORTABILITY MATRIX: what C++ code compiles as-is on iOS, what has Android-specific dependencies (JNI, AHardwareBuffer, android/ headers), and what assumptions the C++ layer makes about buffer formats, memory alignment, and threading model.
+- cpp-sinks.md — C++ consumer interface, JNI bridge, memory handoff. The C++ layer uses OpenCV, which is cross-platform — distinguish OpenCV code (portable) from Android-specific code (JNI, AHardwareBuffer). Include a PORTABILITY MATRIX: what C++ code compiles as-is on iOS, what has Android-specific dependencies, what OpenCV version/modules are used, and what assumptions the C++ layer makes about buffer formats (cv::Mat type, channels, stride), memory alignment, and threading model.
 - image-capture.md — Still image capture flow, EXIF handling, output formats
 - video-recording.md — MediaRecorder/video recording, start/stop, mid-recording edge cases
 - format-conversion.md — YUV↔RGB, color space transforms, where they happen, exact matrix/coefficients if specified

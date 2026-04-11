@@ -105,11 +105,18 @@ AVAILABLE FRAMEWORKS (iOS 26+, verified):
   - VTFrameProcessor (iOS 26+, VideoToolbox): Frame-by-frame video processing with configurable effects. Has a Metal command buffer variant. Returns AsyncSequence of processed frames — fits naturally with Swift concurrency. EVALUATE whether VTFrameProcessorConfiguration supports the transforms we need (color space conversion, resize) before writing custom Metal shaders. If it covers our standard transforms, prefer it over custom shaders — Apple's implementation is optimized. Use custom Metal shaders only for transforms VTFrameProcessor doesn't support.
 
 SENDABLE CONSTRAINTS (Swift 6 compile-time enforcement):
-  CVPixelBuffer is an ObjC type and is not inherently Sendable. When passing frame buffers across actor isolation boundaries (camera queue → @MLProcessor actor → Metal renderer), you must handle Sendable conformance explicitly. Options:
-  - Wrap in an @unchecked Sendable container
-  - Use nonisolated methods at handoff points
-  - Pass raw pointers (UnsafeRawPointer) which are Sendable
-  Design the Sendable strategy for frame buffers explicitly — the compiler will reject code that passes non-Sendable types across actor boundaries.
+  CVPixelBuffer (CoreFoundation type) and cv::Mat are not Sendable. Swift 6 rejects non-Sendable types crossing actor boundaries at compile time.
+
+  Recommended approach: keep all buffer handling on one queue/actor. Only send RESULTS across boundaries.
+  - CVPixelBuffer → raw pointer → cv::Mat → OpenCV processing → all on camera/compute queue
+  - Results (plain Swift structs like DetectionResult { x, y, confidence, label }) are inherently Sendable
+  - Results cross to @MainActor for UI updates
+  - Frame buffers never need to cross actor boundaries
+
+  The C++ CV layer uses OpenCV (same as the Android project — highly portable). The bridge is:
+  CVPixelBufferGetBaseAddress() → cv::Mat wrapping the raw pointer (zero-copy) → OpenCV processing.
+
+  If a design choice requires buffers to cross boundaries, justify why and design the Sendable strategy explicitly.
 </reference-architecture>
 
 <constraints>
@@ -139,7 +146,7 @@ Design using Swift 6 compile-time data isolation:
 - Dedicated serial DispatchQueue for AVCaptureVideoDataOutput (AVFoundation requirement)
 - nonisolated methods for MTKViewDelegate (system calls draw() on its own schedule, must not be actor-isolated)
 - AsyncStream with .bufferingNewest(1) for camera→processing frame delivery (automatic back-pressure via frame dropping)
-- Sendable strategy for frame buffers: CVPixelBuffer is not inherently Sendable. Design how buffers cross actor boundaries (@unchecked Sendable wrapper, nonisolated handoff, or raw pointer passing). The compiler will reject non-Sendable types crossing isolation boundaries.
+- Sendable strategy: keep CVPixelBuffer and cv::Mat confined to a single queue/actor. Only send Sendable result structs (detections, measurements, status) across actor boundaries. If a design choice requires buffers to cross boundaries, justify why and design the Sendable strategy explicitly.
 - Justify every isolation boundary: why this actor/queue, what invariant it protects
 - Map every L2 threading invariant from the audit to a COMPILE-TIME enforcement mechanism where possible (actor isolation > runtime queue checks)
 
@@ -217,24 +224,32 @@ DELIVERABLE 3 — INTEGRATION AND CONTROLS DESIGN
 
 Write design/03-integration-and-controls.md:
 
-### C++ Integration
-- Assess whether the existing C++ code is compatible with direct Swift-C++ interop:
-  - Can the C++ headers be imported as Clang modules?
-  - Do the C++ APIs use supported features (functions, classes, structs, std types, templates)?
-  - Any blockers (C++20 modules, complex template metaprogramming, exception handling)?
-- If compatible: design direct Swift → C++ calls from the CameraEngine actor
-- If not compatible: design ObjC++ bridge layer (Swift → ObjC++ → C++)
-- How processFrame() is called: direct method call from the camera delegate or actor
-- Memory ownership: CVBufferRetain before async handoff, CVBufferRelease after. Design the C++ callback to Swift for buffer release.
-- Threading contract: which actor/queue delivers frames to C++
-- C++ portability assessment (from audit's cpp-sinks card): what compiles as-is, what needs platform shims
+### C++ / OpenCV Integration
+The C++ layer uses OpenCV (same library as the Android project). OpenCV is cross-platform — the core CV logic should be highly portable. Only the JNI entry points need replacement.
+
+- Assess Swift-C++ interop compatibility for the existing C++ code:
+  - Can the C++ headers (including OpenCV headers) be imported as Clang modules?
+  - Any blockers (C++20 modules, complex templates, exceptions)?
+  - If compatible: direct Swift → C++ calls
+  - If not compatible: thin ObjC++ bridge (Swift → ObjC++ → C++)
+- OpenCV iOS setup: CocoaPods, SPM, or manual xcframework
+- Zero-copy frame handoff pattern:
+  1. CVPixelBufferLockBaseAddress (on camera/compute queue)
+  2. CVPixelBufferGetBaseAddress → raw pointer
+  3. cv::Mat(height, width, CV_8UC4, baseAddress, bytesPerRow) — wraps pointer, no copy
+  4. OpenCV processing on the cv::Mat
+  5. Extract results (coordinates, labels, measurements) as plain Swift structs
+  6. CVPixelBufferUnlockBaseAddress
+  7. Send Sendable result structs to @MainActor
+- All buffer handling stays on one queue — no Sendable wrappers needed for CVPixelBuffer or cv::Mat
+- C++ portability assessment (from audit's cpp-sinks card): what compiles as-is, what has Android-specific deps (JNI headers, AHardwareBuffer)
 
 ### Results Return Path
 Design how ML/CV results flow BACK from C++ to the UI.
 
 Concrete tracing scenario — design the types and thread transitions for:
-"C++ detects an object at coordinates (x=0.3, y=0.5, w=0.2, h=0.15) with confidence 0.87 and label 'cell'. Trace from the C++ struct through ObjC++ through Swift to a SwiftUI overlay drawn on the preview."
-Show: the C++ type, the ObjC++ bridge type, the Swift type, the thread each transition happens on, and how the SwiftUI view observes the result.
+"C++ (OpenCV) detects an object at coordinates (x=0.3, y=0.5, w=0.2, h=0.15) with confidence 0.87 and label 'cell'. Trace from the C++ struct through the bridge layer (direct Swift-C++ interop or ObjC++ if needed) to a SwiftUI overlay drawn on the preview."
+Show: the C++ type, the Swift type (Sendable struct), the thread/actor each transition happens on, and how the SwiftUI view observes the result.
 
 ### Camera Device Discovery and Selection
 - AVCaptureDevice.DiscoverySession: how to enumerate available cameras
@@ -261,7 +276,7 @@ DELIVERABLE 4 — PHASED IMPLEMENTATION PLAN
 
 Write design/04-implementation-phases.md:
 
-Six phases. Each is a self-contained milestone that produces a testable app. Each phase MUST include a file tree showing every Swift/ObjC++/Metal file to create, with each file's responsibility and which design document section it implements.
+Six phases. Each is a self-contained milestone that produces a testable app. Each phase MUST include a file tree showing every Swift/C++/Metal file to create (and .mm ObjC++ files only if the C++ interop assessment requires them), with each file's responsibility and which design document section it implements.
 
 ### Phase 1a — Camera Capture + State Machine + Lifecycle
 Scope:
@@ -326,13 +341,14 @@ File tree:
 
 ### Phase 3 — C++ Sink Integration + Fan-Out Topology
 Scope:
-- C++ integration: direct Swift-C++ interop if C++ code is compatible, ObjC++ bridge if not (decision from design/03-integration-and-controls.md)
-- CameraEngine owns C++ consumer references
-- Processed frame delivery to C++ sinks via AsyncStream (.bufferingNewest(1) for automatic back-pressure)
-- Memory ownership: CVBufferRetain/Release for async handoff, with C++ callback for buffer release
+- C++ / OpenCV integration using the approach from design/03-integration-and-controls.md (direct Swift-C++ or ObjC++ bridge)
+- OpenCV iOS framework setup (CocoaPods, SPM, or xcframework)
+- Zero-copy frame handoff: CVPixelBuffer → lock → raw pointer → cv::Mat → OpenCV processing → unlock
+- Processed frame delivery via AsyncStream (.bufferingNewest(1) for automatic back-pressure)
+- All buffer handling on one queue — only Sendable result structs cross actor boundaries
 - Fan-out topology: camera → Metal → [preview + ML sink + CV sink] simultaneously
 - Multiple sink support (ML consumer + CV consumer)
-- Results return path: C++ results → ObjC++ → ViewModel → SwiftUI overlay
+- Results return path: C++/OpenCV results (Sendable structs) → @MainActor ViewModel → SwiftUI overlay
 - Back-pressure handling across the full fan-out
 
 Key decision (resolve from design/02-metal-pipeline.md):
@@ -348,7 +364,7 @@ Testable acceptance:
 - ML/CV results appear in SwiftUI overlay
 
 File tree:
-[REQUIRED: produce the file tree, including .mm ObjC++ files]
+[REQUIRED: produce the file tree — include .mm ObjC++ files only if the C++ interop assessment requires them]
 
 ### Phase 4 — Performance Tuning + Resilience
 Scope:
@@ -465,7 +481,7 @@ If the audit documentation has gaps, make provisional design choices with assump
 - The concurrency design justifies each actor/class/queue choice (not just "use actors everywhere")
 - The Metal pipeline specifies MTLPixelFormat, dimensions, usage flags, and storage mode for every texture
 - VTFrameProcessor has been evaluated for standard transforms before custom shaders are proposed
-- A Sendable strategy for CVPixelBuffer across actor boundaries is explicitly designed
+- Buffer handling is confined to a single queue/actor, with only Sendable result types crossing boundaries (or, if buffers must cross, the Sendable strategy is explicitly justified and designed)
 - The profiling strategy defines os_signpost intervals and frame budget thresholds
 - iOS-specific failure modes (thermal, system pressure, permissions) are designed for, not ignored
 - The design decisions log captures every significant choice with alternatives and rationale

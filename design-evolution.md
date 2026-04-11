@@ -2,6 +2,88 @@
 
 Keeping track of conversation to explain how and why the structure has evolved.
 
+## 2026-04-12 we use opencv!
+
+USER: ❯ do we need CVPixelBuffer is an ObjC type?
+
+Good catch — I was imprecise. CVPixelBuffer is a CoreFoundation type (CVPixelBufferRef / CFTypeRef), not an Objective-C class. It's C-based, not ObjC-based. But the Sendable concern is the same —
+  CoreFoundation types aren't Sendable either.
+
+  The deeper question is: do we need CVPixelBuffer to travel across actor boundaries at all?
+
+  The answer depends on where processing happens:
+
+  Option A: CVPixelBuffer crosses boundaries (current design)
+    Camera queue → [CVPixelBuffer] → @MLProcessor actor → [CVPixelBuffer] → Metal
+    Problem: CVPixelBuffer not Sendable, needs wrapper
+
+  Option B: Convert early, send texture (minimize CVPixelBuffer scope)
+    Camera queue → CVPixelBuffer → MTLTexture (via cache) → [MTLTexture] → actors
+    Problem: MTLTexture is also not Sendable (it's a protocol)
+
+  Option C: Keep all buffer work on one queue (no crossing)
+    Camera queue: CVPixelBuffer → MTLTexture → Metal processing → done
+    Only RESULTS cross to @MainActor (coordinates, labels — plain Swift structs, inherently Sendable)
+    Problem: camera queue is doing too much work, could stall frame delivery
+
+  Option D: VTFrameProcessor handles it
+    Camera queue → VTFrameProcessor.process() → AsyncSequence<ProcessedFrame>
+    VTFrameProcessor manages buffers internally
+    Problem: depends on what transforms VTFrameProcessor supports
+
+  Option C is actually the cleanest — keep all buffer handling within the camera/compute scope, only send Sendable results (structs, enums, value types) across actor boundaries. The frame buffer never needs
+   to cross an isolation domain if the pipeline stays on one serial queue or actor.
+
+USER: We use opencv!
+
+That's important context — and good news for portability. The Android project already uses OpenCV (it's in the CLAUDE.md and build config). This means:
+
+  1. The C++ code is likely highly portable. OpenCV abstracts platform differences. cv::Mat works the same on Android and iOS. The JNI-specific parts (function entry points) need to change, but the actual
+  CV logic should compile as-is.
+  2. The bridge is straightforward. CVPixelBuffer → CVPixelBufferGetBaseAddress() → cv::Mat wrapping the raw pointer (zero-copy). OpenCV doesn't care where the pixels came from.
+  3. This simplifies the Sendable question. The natural pattern is:
+  Camera queue → CVPixelBuffer → lock base address → cv::Mat (zero-copy wrap)
+  → OpenCV processing → results (plain structs) → @MainActor
+  3. CVPixelBuffer and cv::Mat stay on one queue. Only results cross actor boundaries. No Sendable wrappers needed for buffers.
+  4. OpenCV is available on iOS via CocoaPods, Swift Package Manager, or manual framework. Since the Android project already has OpenCV as a dependency, the build config just needs the iOS equivalent.
+
+
+The four options I listed were:
+
+  ┌────────┬─────────────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │ Option │                           Pattern                           │                                                  Works for OpenCV?                                                   │
+  ├────────┼─────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ A      │ CVPixelBuffer crosses actor boundaries via Sendable wrapper │ Adds complexity for no gain — OpenCV needs a raw pointer, not a CVPixelBuffer on a different actor                   │
+  ├────────┼─────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ B      │ Convert to MTLTexture early, pass texture                   │ Wrong direction. OpenCV needs CPU pixels, not GPU textures. You'd have to read back from GPU → CPU, which is a copy. │
+  ├────────┼─────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ C      │ Keep all buffer work on one queue, send only results        │ Cleanest fit. CVPixelBuffer → raw pointer → cv::Mat → OpenCV → results. No crossing.                                 │
+  ├────────┼─────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ D      │ VTFrameProcessor handles it                                 │ VTFrameProcessor is for video effects, not OpenCV. Doesn't apply to the CV path.                                     │
+  └────────┴─────────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  The honest answer: Option C is the only one that makes sense for OpenCV. The other three don't fail because of Sendable — they fail because they don't match how OpenCV works:
+
+  - OpenCV needs CPU-accessible pixels (a pointer to memory it can read)
+  - CVPixelBuffer already has those pixels (via CVPixelBufferGetBaseAddress)
+  - Moving the buffer to a different actor/queue just to process it there adds unnecessary complexity
+  - Moving it to an MTLTexture first means going GPU → CPU readback, which is a copy and defeats zero-copy
+
+  The pipeline is naturally single-queue for the OpenCV path:
+
+  Camera queue delivers CVPixelBuffer
+    → lock base address (same queue)
+    → wrap as cv::Mat (same queue, zero-copy)
+    → OpenCV processes (same queue)
+    → unlock base address (same queue)
+    → send DetectionResult struct to @MainActor (Sendable, trivial)
+
+  The only nuance: if OpenCV processing is slow (>33ms at 30fps), it blocks the camera queue and you drop frames. The fix is AsyncStream with .bufferingNewest(1) feeding a dedicated processing queue — but
+  it's the stream that crosses the boundary, not the buffer. The buffer is created fresh from each dequeued CMSampleBuffer on the processing side.
+
+  The prompt already captures Option C correctly now. The other options were me over-engineering the Sendable concern before knowing OpenCV was the consumer.
+
+
 ## 2026-04-12 search docs better
 
  ★ Insight ─────────────────────────────────────
