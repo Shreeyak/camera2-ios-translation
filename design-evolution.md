@@ -2,6 +2,60 @@
 
 Keeping track of conversation to explain how and why the structure has evolved.
 
+## 2026-04-12 claude feedback on prompt 2
+
+★ Insight ─────────────────────────────────────
+  The three most impactful changes:
+  1. <handling-audit-gaps> — The original prompt had no stance on what to do when the audit is wrong or incomplete. Now the agent makes provisional choices with stated assumptions instead of blocking. This
+  is critical for autonomous operation.
+  2. "What NOT to Port" section — Prevents cargo-culting Android-specific workarounds. The agent must explicitly identify Android-only guards and confirm they're safe to omit. This saves the implementing
+  agent from building guards against problems that don't exist on iOS.
+  3. iOS-specific failure modes as a required section — Thermal state, system pressure, permission denial, multi-app camera conflicts. The Android audit can't anticipate these. Without this section, the iOS
+   app handles Android failure modes perfectly and crashes on iOS-specific ones.
+  ─────────────────────────────────────────────────
+
+  Summary of All Changes
+
+  ┌────────────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │              Feedback              │                                                 Change                                                  │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Reference architecture mixes roles │ Split into PATTERN (guidance), HARD REQUIREMENTS (non-negotiable), BACKGROUND (context)                 │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Assumes audit is complete          │ Added <handling-audit-gaps> section with stance for incomplete/ambiguous/contradictory/wrong audit data │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Deliverable 1 monolithic           │ Split into 3 files: 01-concurrency-and-state.md, 02-metal-pipeline.md, 03-integration-and-controls.md   │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ No device discovery                │ Added Camera Device Discovery and Selection section                                                     │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ No HDR consideration               │ Added Color Space and HDR Consideration section in Metal pipeline                                       │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ No profiling strategy              │ Added <profiling-strategy> section with os_signpost intervals and frame budget                          │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ No iOS-specific failures           │ Added iOS-Specific Failure Modes section: thermal, system pressure, multi-app, permissions              │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ No permissions design              │ Added Permissions Design section and WAITING_FOR_PERMISSION state                                       │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Phase 1 overloaded                 │ Split into Phase 1a (camera + state machine + lifecycle) and Phase 1b (camera controls)                 │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Phase 4 grab bag                   │ Moved fan-out topology to Phase 3; Phase 4 = pure performance + resilience                              │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Phase 5 bundles too much           │ Split into Phase 5 (capture + recording) and Phase 6 (parity + polish)                                  │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ "Files to create" placeholder      │ Made file tree a required output per phase, added to forbidden-actions                                  │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ iOS 26+ aggressive                 │ Pushed back — added "Why iOS 26+:" justification line                                                   │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Quality gate too rigid             │ Changed to "mapped OR documented as not applicable with justification"                                  │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Design Decisions Log               │ Added as Deliverable 5 with structured format                                                           │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Metal texture vocabulary           │ Added per-texture spec: MTLPixelFormat, dimensions, usage flags, storage mode                           │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Concrete results return path       │ Added specific tracing scenario (object detection at coordinates → SwiftUI overlay)                     │
+  ├────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ "What NOT to port"                 │ Added as dedicated section in integration-and-controls                                                  │
+  └────────────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
 ## 2026-04-12 claude feedback on prompt 1
 
 Prompt will output too much detail. give briefs instead. 
