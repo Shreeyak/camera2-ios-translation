@@ -198,6 +198,7 @@ Trace a camera frame from sensor to every consumer:
 - Fan-out points to multiple consumers (preview, C++ sinks, capture)
 - Back-pressure: what happens when a consumer is slower than frame production (frame dropping? queuing? blocking?)
 - Memory ownership at each handoff
+- Buffer pooling strategy: are buffers pre-allocated? Pool size? What happens under memory pressure?
 - Zero-copy vs copy paths (which transfers involve memcpy, which don't)
 - RESULTS RETURN PATH: how do ML/CV results flow BACK from C++ consumers to the UI? (e.g., inference results, detections, measurements). Document the upward data flow, not just the downward frame delivery.
 - Performance budget: frame rate targets, any known timing constraints per pipeline stage, where latency budget is spent
@@ -258,7 +259,24 @@ Write to output/05-translation-cards/:
 - preview-rendering.md — Preview surface setup and frame display
 - gpu-pipeline.md — OpenGL ES processing pipeline, EGL context, surface management
 - shaders.md — Each GLSL shader program: what it computes, input/output formats, uniform parameters
-- cpp-sinks.md — C++ consumer interface, JNI bridge, memory handoff. The C++ layer uses OpenCV, which is cross-platform — distinguish OpenCV code (portable) from Android-specific code (JNI, AHardwareBuffer). Include a PORTABILITY MATRIX: what C++ code compiles as-is on iOS, what has Android-specific dependencies, what OpenCV version/modules are used, and what assumptions the C++ layer makes about buffer formats (cv::Mat type, channels, stride), memory alignment, and threading model.
+- cpp-sinks.md — C++ consumer interface, JNI bridge, memory handoff. The C++ layer uses OpenCV, which is cross-platform — distinguish OpenCV code (portable) from Android-specific code (JNI, AHardwareBuffer). Include:
+
+  PORTABILITY MATRIX:
+  | Code section | Portable (OpenCV/std) | Android-specific | What needs to change for iOS |
+  - What compiles as-is, what has Android deps, what OpenCV version/modules are used
+
+  HARDWARE POINTER TOUCHPOINTS:
+  Where does C++ code directly access hardware buffer pointers (AHardwareBuffer, HardwareBuffer_acquire, etc.)? For each touchpoint:
+  - What pointer type and memory layout is expected (stride, alignment, pixel format)?
+  - Is the pointer assumed to be GPU-mapped, CPU-mapped, or both?
+  - On iOS, this becomes CVPixelBufferGetBaseAddress — document the exact alignment and format expectations so the iOS bridge can match them.
+
+  BUFFER LIFECYCLE & MEMORY PRESSURE:
+  - Are frame buffers pre-allocated in a pool, or allocated per-frame?
+  - Is there a buffer pool size limit? How is it configured?
+  - What happens under memory pressure (Android OOM)? Does the system degrade gracefully or crash?
+  - How does the C++ layer signal "done" with a buffer back to the producer?
+  - Are there any global memory limits or watermarks?
 - image-capture.md — Still image capture flow, EXIF handling, output formats
 - video-recording.md — MediaRecorder/video recording, start/stop, mid-recording edge cases
 - format-conversion.md — YUV↔RGB, color space transforms, where they happen, exact matrix/coefficients if specified

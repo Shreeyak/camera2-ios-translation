@@ -116,7 +116,7 @@ SENDABLE CONSTRAINTS (Swift 6 compile-time enforcement):
   The C++ CV layer uses OpenCV (same as the Android project — highly portable). The bridge is:
   CVPixelBufferGetBaseAddress() → cv::Mat wrapping the raw pointer (zero-copy) → OpenCV processing.
 
-  If a design choice requires buffers to cross boundaries, justify why and design the Sendable strategy explicitly.
+  If a design choice requires buffers to cross boundaries, justify why and design the Sendable strategy explicitly. Swift 6's `sending` parameter annotation (SE-0430) allows passing non-Sendable values across isolation boundaries when the compiler can prove the caller doesn't retain a reference — evaluate this as a cleaner alternative to @unchecked Sendable wrappers.
 </reference-architecture>
 
 <constraints>
@@ -131,6 +131,23 @@ SENDABLE CONSTRAINTS (Swift 6 compile-time enforcement):
 </constraints>
 
 <deliverables>
+
+DELIVERABLE 0 — GAP ANALYSIS (do this FIRST)
+
+Write design/00-gap-analysis.md:
+
+Before designing anything, read the entire audit output and identify:
+- MISSING INFORMATION: What does the audit not cover that you need to design the iOS app? (e.g., buffer pool sizes, exact color matrix coefficients, timing constraints)
+- ARCHITECTURAL RISKS: Where does the Android design imply something that won't work on iOS? (e.g., "Android uses a blocking queue here; iOS needs AsyncStream")
+- AMBIGUITIES: Where could the audit be interpreted multiple ways?
+- CONTRADICTIONS: Where do two audit files disagree?
+
+For each gap/risk, state:
+| Gap/Risk | Audit file | What's missing or wrong | Impact on iOS design | Can I make a provisional choice? |
+
+This step breaks the waterfall — if critical gaps exist, you can flag them for the user before committing to a design. Make provisional choices where possible (state your assumptions), and flag truly blocking gaps.
+
+Then proceed to the design deliverables below.
 
 DELIVERABLE 1 — CONCURRENCY, STATE, AND ERROR DESIGN
 
@@ -250,6 +267,8 @@ Design how ML/CV results flow BACK from C++ to the UI.
 Concrete tracing scenario — design the types and thread transitions for:
 "C++ (OpenCV) detects an object at coordinates (x=0.3, y=0.5, w=0.2, h=0.15) with confidence 0.87 and label 'cell'. Trace from the C++ struct through the bridge layer (direct Swift-C++ interop or ObjC++ if needed) to a SwiftUI overlay drawn on the preview."
 Show: the C++ type, the Swift type (Sendable struct), the thread/actor each transition happens on, and how the SwiftUI view observes the result.
+
+Telemetry: Design os_signpost intervals for the return path so Instruments can show exactly where "inference latency" ends and "UI update latency" begins. Every C++ → Swift result handoff should trigger a signpost interval.
 
 ### Camera Device Discovery and Selection
 - AVCaptureDevice.DiscoverySession: how to enumerate available cameras
