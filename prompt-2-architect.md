@@ -63,9 +63,10 @@ PATTERN (design guidance — adapt to your specific needs):
   - UIViewRepresentable hosting custom MTKView
   - Bridges declarative SwiftUI to imperative Metal pipeline
 
-  BOTTOM LAYER — ObjC++ & Metal (Engine)
-  - CameraEngine class (ObjC++) owns AVCaptureSession and Metal device
+  BOTTOM LAYER — Engine (Swift Actor + C++ interop)
+  - CameraEngine (Swift actor or class) owns AVCaptureSession and Metal device
   - AVCaptureVideoDataOutput delegate lives here
+  - C++ integration: prefer direct Swift-C++ interop (Swift 5.9+) over ObjC++ bridging. Use ObjC++ only if the C++ API uses features not yet supported by Swift-C++ interop (C++20 modules, complex templates, exceptions).
   - Manages MTLCommandQueue and memory handoff to C++ ML/CV layer
 
 HARD REQUIREMENTS (non-negotiable correctness constraints):
@@ -74,24 +75,42 @@ HARD REQUIREMENTS (non-negotiable correctness constraints):
 
   2. MEMORY RETENTION: If C++ processes frames asynchronously, CVBufferRetain the CVPixelBuffer before handoff and CVBufferRelease after C++ finishes. Without this, the camera recycles the buffer mid-processing → corruption or crash.
 
-  3. FRAME DROPPING: If C++ is busy when a new frame arrives, drop the new frame immediately. Do NOT queue. Queuing causes memory exhaustion and latency spikes.
+  3. FRAME DROPPING via AsyncStream: Use AsyncStream with .bufferingNewest(1) to pipe frames from camera to processing. This keeps only the latest frame and automatically drops older ones when the consumer is slow — no manual drop logic needed, memory stays flat, latency stays low.
 
   4. NO AVCaptureVideoPreviewLayer for processed preview: Since frames go through GPU processing, draw Metal output to MTKView. The preview layer shows raw camera feed, not processed output. (Phase 1 may use it temporarily as a scaffold.)
+
+  5. CVMetalTextureCache LIFECYCLE: Create the texture cache ONCE at pipeline setup. Reuse it for every frame. Do NOT create Metal textures from pixel buffers without a cache — it's expensive per-frame.
 
 BACKGROUND CONTEXT (for your understanding, not prescriptive):
 
   - AVFoundation delivers CMSampleBuffer containing CVPixelBuffer on the camera callback thread
   - Metal command buffers can be submitted from any thread
-  - The three-thread model (Main/Camera/Compute) is a common starting point but you may refine it
   - Results from C++ must flow back through the ViewModel to SwiftUI — design this explicitly
+
+RECOMMENDED CONCURRENCY PATTERN (Swift 6 compile-time isolation):
+
+  Rather than managing threads manually, use Swift 6's actor isolation to enforce safety at compile time:
+  | Component | Isolation | Why |
+  | UI/Overlays | @MainActor | Never parse ML results here. Receive only simple view states. |
+  | Camera Producer | Dedicated serial DispatchQueue | AVCaptureVideoDataOutput requires a serial queue. Hand off to actors immediately — do not block this queue. |
+  | ML/CV Engine | Custom @globalActor (e.g., @MLProcessor) | Walls off C++ ML logic. Compiler enforces that ML code cannot be called from camera or render paths accidentally. |
+  | Metal Renderer | nonisolated methods | MTKViewDelegate must not be actor-isolated — the system calls draw() on its own schedule. Use nonisolated to ensure the screen draws even if ML is lagging. |
+
+  This replaces the three-thread model. The compiler enforces isolation boundaries rather than relying on runtime queue discipline.
+
+AVAILABLE FRAMEWORKS (iOS 26+, verified):
+  - Metal 4 (WWDC 2025): Improved command encoding, ML+graphics integration. Evaluate whether Metal 4's ML features simplify the pipeline.
+  - MetalFX: Temporal upscaling, frame interpolation, denoising. Useful if ML outputs lower-resolution data that needs upscaling to preview resolution.
+  - Swift-C++ interop (Swift 5.9+): Direct C++ header import without ObjC++ bridge. Supports functions, classes, structs, templates, std library types.
+  - NOTE: VTFrameProcessor does NOT exist. Do not use it. Standard Metal compute shaders are the correct approach for color/resize transforms.
 </reference-architecture>
 
 <constraints>
-- Target: iOS 26+, Swift 6, Metal 3. Why iOS 26+: enables Swift 6 strict concurrency, latest AVCaptureSession APIs, and Metal 3 features. No backward-compatibility shims.
-- GPU: Metal compute and render pipelines (no OpenGL, no Core Image unless justified)
+- Target: iOS 26+, Swift 6, Metal 4. Why iOS 26+: enables Swift 6 strict concurrency with compile-time data isolation, Metal 4 ML+graphics integration, and latest AVCaptureSession APIs. No backward-compatibility shims.
+- GPU: Metal 4 compute and render pipelines (no OpenGL, no Core Image unless justified). Evaluate MetalFX for upscaling if applicable.
 - UI: SwiftUI primary, UIKit via UIViewRepresentable only where SwiftUI lacks capability (MTKView for processed preview, AVCaptureVideoPreviewLayer ONLY as a temporary Phase 1 scaffold)
-- C++ interop: ObjC++ bridging layer (Swift → ObjC++ → C++). Use Objective-C ONLY for this bridge and for Apple frameworks that lack Swift-native API.
-- Concurrency: Swift structured concurrency (actors, async/await, TaskGroups) for state management. The camera callback and Metal compute paths may need dedicated serial DispatchQueues for performance — justify each choice (actor vs GCD queue).
+- C++ interop: Prefer direct Swift-C++ interop (available since Swift 5.9). Swift can import C++ headers directly via Clang modules — no ObjC++ needed for most APIs. Fall back to ObjC++ only for C++ features not yet supported (C++20 modules, complex template patterns, exceptions). Assess the existing C++ code's compatibility with direct Swift interop before choosing.
+- Concurrency: Swift 6 compile-time data isolation using actors and global actors. Use @MainActor for UI, custom @globalActor for ML isolation, dedicated serial DispatchQueue only where AVFoundation requires it (camera output delegate). The compiler enforces isolation boundaries — prefer this over manual queue discipline.
 - Error handling and camera controls from day one — not bolted on later.
 - Zero-copy throughout: CVPixelBuffer → MTLTexture → C++ must avoid CPU copies.
 - Frame dropping, not queuing, when consumers are slow.
@@ -105,12 +124,16 @@ Write design/01-concurrency-and-state.md:
 
 ### Concurrency Architecture
 For each Android threading construct documented in the audit, design the Swift equivalent:
-| Android construct | Swift equivalent | Why this choice (actor vs GCD vs other) |
-- Where actors are used vs classes vs dedicated DispatchQueues
-- Which operations are @MainActor
-- How AVCaptureSession delegate callbacks feed into the processing pipeline
-- Back-pressure strategy: frame dropping when consumers are slow
-- Map every L2 threading invariant from the audit to a Swift enforcement mechanism
+| Android construct | Swift equivalent | Why this choice (actor vs GCD vs global actor) |
+
+Design using Swift 6 compile-time data isolation:
+- @MainActor for all UI state updates
+- Custom @globalActor (e.g., @MLProcessor) for ML/CV processing isolation — compiler prevents accidental cross-boundary calls
+- Dedicated serial DispatchQueue for AVCaptureVideoDataOutput (AVFoundation requirement)
+- nonisolated methods for MTKViewDelegate (system calls draw() on its own schedule, must not be actor-isolated)
+- AsyncStream with .bufferingNewest(1) for camera→processing frame delivery (automatic back-pressure via frame dropping)
+- Justify every isolation boundary: why this actor/queue, what invariant it protects
+- Map every L2 threading invariant from the audit to a COMPILE-TIME enforcement mechanism where possible (actor isolation > runtime queue checks)
 
 ### State Machine Design
 - Replicate the Android state machine using Swift enum + actor
@@ -182,11 +205,16 @@ DELIVERABLE 3 — INTEGRATION AND CONTROLS DESIGN
 Write design/03-integration-and-controls.md:
 
 ### C++ Integration
-- ObjC++ bridge pattern: CameraEngine (ObjC++) holds C++ consumer references
-- How processFrame() is called: direct method call from the camera delegate
-- Memory ownership: CVBufferRetain before async handoff, CVBufferRelease after
-- Threading contract: which queue delivers frames to C++
-- C++ portability assessment (from audit's cpp-sinks card): what compiles as-is, what needs shims
+- Assess whether the existing C++ code is compatible with direct Swift-C++ interop:
+  - Can the C++ headers be imported as Clang modules?
+  - Do the C++ APIs use supported features (functions, classes, structs, std types, templates)?
+  - Any blockers (C++20 modules, complex template metaprogramming, exception handling)?
+- If compatible: design direct Swift → C++ calls from the CameraEngine actor
+- If not compatible: design ObjC++ bridge layer (Swift → ObjC++ → C++)
+- How processFrame() is called: direct method call from the camera delegate or actor
+- Memory ownership: CVBufferRetain before async handoff, CVBufferRelease after. Design the C++ callback to Swift for buffer release.
+- Threading contract: which actor/queue delivers frames to C++
+- C++ portability assessment (from audit's cpp-sinks card): what compiles as-is, what needs platform shims
 
 ### Results Return Path
 Design how ML/CV results flow BACK from C++ to the UI.
@@ -285,10 +313,10 @@ File tree:
 
 ### Phase 3 — C++ Sink Integration + Fan-Out Topology
 Scope:
-- ObjC++ bridge layer: CameraEngine owns C++ consumer references
-- Processed frame delivery to C++ sinks
-- Memory ownership: CVBufferRetain/Release for async handoff
-- Frame dropping when sinks are busy
+- C++ integration: direct Swift-C++ interop if C++ code is compatible, ObjC++ bridge if not (decision from design/03-integration-and-controls.md)
+- CameraEngine owns C++ consumer references
+- Processed frame delivery to C++ sinks via AsyncStream (.bufferingNewest(1) for automatic back-pressure)
+- Memory ownership: CVBufferRetain/Release for async handoff, with C++ callback for buffer release
 - Fan-out topology: camera → Metal → [preview + ML sink + CV sink] simultaneously
 - Multiple sink support (ML consumer + CV consumer)
 - Results return path: C++ results → ObjC++ → ViewModel → SwiftUI overlay

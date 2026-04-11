@@ -2,6 +2,51 @@
 
 Keeping track of conversation to explain how and why the structure has evolved.
 
+## 202
+
+ ★ Insight ─────────────────────────────────────
+  Three findings that materially changed our prompts:
+
+  1. Swift-C++ direct interop eliminates ObjC++. Since Swift 5.9, Swift imports C++ headers via Clang modules. Our original "Swift → ObjC++ → C++" sandwich becomes "Swift → C++ (direct)." This removes an
+  entire architectural layer. The prompt now says "prefer direct, fall back to ObjC++ if needed" with a compatibility assessment step.
+  2. @globalActor replaces manual queue discipline. Instead of a dedicated DispatchQueue for ML processing, a custom @MLProcessor global actor gives compile-time enforcement — the compiler literally
+  prevents you from calling ML code from the wrong thread. This is strictly better than runtime queue checks. The concurrency section now specifies this pattern.
+  3. AsyncStream with .bufferingNewest(1) is the concrete back-pressure mechanism. Our prompt said "drop frames" but didn't say how. This is the 4-line Swift API that does it automatically — no manual drop
+  logic, memory stays flat, latest frame always available.
+
+  What we rejected from the feedback:
+  - "VTFrameProcessor" — doesn't exist (hallucinated). Added an explicit warning in the prompt.
+  - "Concurrent Actor" — not a Swift concept. Actors are serial. Used nonisolated instead.
+  - SwiftData for metadata — over-engineered for this demo app.
+  ─────────────────────────────────────────────────
+
+  Summary of Changes
+
+  ┌──────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────┐
+  │                          Change                          │                                 Where Applied                                  │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ Swift-C++ direct interop as default (ObjC++ as fallback) │ Prompt 2: reference architecture, constraints, C++ integration design, Phase 3 │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ @globalActor pattern for ML isolation                    │ Prompt 2: reference architecture concurrency table, concurrency deliverable    │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ AsyncStream .bufferingNewest(1) for back-pressure        │ Prompt 2: hard requirements, concurrency deliverable, Phase 3                  │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ Metal 4 (verified real)                                  │ Prompt 2: constraints updated from Metal 3 → Metal 4                           │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ MetalFX noted as available                               │ Prompt 2: constraints, available frameworks                                    │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ VTFrameProcessor flagged as non-existent                 │ Prompt 2: explicit warning in available frameworks                             │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ nonisolated for MTKViewDelegate (not "concurrent actor") │ Prompt 2: concurrency table                                                    │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ CVMetalTextureCache lifecycle (create once, reuse)       │ Prompt 2: hard requirement #5                                                  │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ C++ interop compatibility assessment step                │ Prompt 2: C++ integration design, Phase 3                                      │
+  ├──────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ Updated reference architecture file                      │ reference/ios-camera-pipeline-patterns.md                                      │
+  └──────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘
+
+
 ## 2026-04-12 claude feedback on prompt 2
 
 ★ Insight ─────────────────────────────────────
