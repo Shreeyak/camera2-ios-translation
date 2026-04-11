@@ -102,7 +102,14 @@ AVAILABLE FRAMEWORKS (iOS 26+, verified):
   - Metal 4 (WWDC 2025): Improved command encoding, ML+graphics integration. Evaluate whether Metal 4's ML features simplify the pipeline.
   - MetalFX: Temporal upscaling, frame interpolation, denoising. Useful if ML outputs lower-resolution data that needs upscaling to preview resolution.
   - Swift-C++ interop (Swift 5.9+): Direct C++ header import without ObjC++ bridge. Supports functions, classes, structs, templates, std library types.
-  - NOTE: VTFrameProcessor does NOT exist. Do not use it. Standard Metal compute shaders are the correct approach for color/resize transforms.
+  - VTFrameProcessor (iOS 26+, VideoToolbox): Frame-by-frame video processing with configurable effects. Has a Metal command buffer variant. Returns AsyncSequence of processed frames — fits naturally with Swift concurrency. EVALUATE whether VTFrameProcessorConfiguration supports the transforms we need (color space conversion, resize) before writing custom Metal shaders. If it covers our standard transforms, prefer it over custom shaders — Apple's implementation is optimized. Use custom Metal shaders only for transforms VTFrameProcessor doesn't support.
+
+SENDABLE CONSTRAINTS (Swift 6 compile-time enforcement):
+  CVPixelBuffer is an ObjC type and is not inherently Sendable. When passing frame buffers across actor isolation boundaries (camera queue → @MLProcessor actor → Metal renderer), you must handle Sendable conformance explicitly. Options:
+  - Wrap in an @unchecked Sendable container
+  - Use nonisolated methods at handoff points
+  - Pass raw pointers (UnsafeRawPointer) which are Sendable
+  Design the Sendable strategy for frame buffers explicitly — the compiler will reject code that passes non-Sendable types across actor boundaries.
 </reference-architecture>
 
 <constraints>
@@ -132,6 +139,7 @@ Design using Swift 6 compile-time data isolation:
 - Dedicated serial DispatchQueue for AVCaptureVideoDataOutput (AVFoundation requirement)
 - nonisolated methods for MTKViewDelegate (system calls draw() on its own schedule, must not be actor-isolated)
 - AsyncStream with .bufferingNewest(1) for camera→processing frame delivery (automatic back-pressure via frame dropping)
+- Sendable strategy for frame buffers: CVPixelBuffer is not inherently Sendable. Design how buffers cross actor boundaries (@unchecked Sendable wrapper, nonisolated handoff, or raw pointer passing). The compiler will reject non-Sendable types crossing isolation boundaries.
 - Justify every isolation boundary: why this actor/queue, what invariant it protects
 - Map every L2 threading invariant from the audit to a COMPILE-TIME enforcement mechanism where possible (actor isolation > runtime queue checks)
 
@@ -169,7 +177,12 @@ DELIVERABLE 2 — METAL PIPELINE DESIGN
 Write design/02-metal-pipeline.md:
 
 ### Pipeline Architecture
-- For each Android GPU processing step (from the shader translation card):
+- FIRST: Evaluate VTFrameProcessor (iOS 26+, VideoToolbox) for each processing step:
+  - Check which VTFrameProcessorConfiguration options cover our transforms (color space conversion, resize, etc.)
+  - VTFrameProcessor has a Metal command buffer variant and returns AsyncSequence — it integrates with both Metal and Swift concurrency natively
+  - If VTFrameProcessor covers a standard transform, prefer it over a custom shader (Apple's implementation is hardware-optimized)
+  - Document which transforms VTFrameProcessor handles vs which require custom Metal shaders
+- For transforms requiring custom shaders:
   - Metal equivalent: compute shader vs fragment shader vs MPS kernel
   - Why this choice for each stage
 - Pipeline topology diagram (Mermaid)
@@ -451,6 +464,8 @@ If the audit documentation has gaps, make provisional design choices with assump
 - Each phase has a concrete file tree (not placeholders) and testable acceptance criteria
 - The concurrency design justifies each actor/class/queue choice (not just "use actors everywhere")
 - The Metal pipeline specifies MTLPixelFormat, dimensions, usage flags, and storage mode for every texture
+- VTFrameProcessor has been evaluated for standard transforms before custom shaders are proposed
+- A Sendable strategy for CVPixelBuffer across actor boundaries is explicitly designed
 - The profiling strategy defines os_signpost intervals and frame budget thresholds
 - iOS-specific failure modes (thermal, system pressure, permissions) are designed for, not ignored
 - The design decisions log captures every significant choice with alternatives and rationale

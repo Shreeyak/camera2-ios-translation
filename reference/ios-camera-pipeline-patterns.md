@@ -83,8 +83,21 @@ Prefer direct interop. Fall back to ObjC++ only if the C++ code uses unsupported
 | MetalFX | Active | Temporal upscaling, frame interpolation, denoising |
 | MPS (Metal Performance Shaders) | Active | Optimized compute kernels |
 | Swift-C++ interop | Stable (Swift 5.9+) | Direct C++ calls without ObjC++ bridge |
+| VTFrameProcessor | iOS 26+ (VideoToolbox) | Frame-by-frame video processing with configurable effects. Metal command buffer variant available. Returns AsyncSequence. Evaluate for standard transforms before writing custom shaders. |
 
-**NOTE**: VTFrameProcessor does NOT exist — it is a fabricated API. Use Metal compute shaders for color/resize transforms.
+## Sendable and Actor Isolation
+
+CVPixelBuffer (CoreVideo ObjC type) is **not inherently Sendable**. Swift 6 enforces Sendable at compile time for types crossing actor boundaries. When passing frame buffers between:
+- Camera serial queue → @MLProcessor global actor
+- @MLProcessor → Metal renderer (nonisolated)
+- Any actor → @MainActor
+
+You must handle Sendable conformance explicitly:
+- **@unchecked Sendable wrapper**: Wrap CVPixelBuffer in a struct that conforms to `@unchecked Sendable`. You take responsibility for thread safety.
+- **nonisolated handoff**: Use nonisolated methods at boundary points to avoid crossing isolation domains.
+- **Raw pointer passing**: `UnsafeRawPointer` is Sendable. Pass pointers with explicit retain/release.
+
+Design this strategy early — the compiler will reject code that violates isolation boundaries.
 
 ## Results Return Path
 

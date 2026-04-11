@@ -2,7 +2,36 @@
 
 Keeping track of conversation to explain how and why the structure has evolved.
 
-## 202
+## 2026-04-12 search docs better
+
+ ★ Insight ─────────────────────────────────────
+  Three corrections and their impact:
+
+  1. VTFrameProcessor is real (iOS 26+). My earlier "hallucinated" call was wrong — it's a new VideoToolbox API. It processes frames with configurable effects, has a Metal command buffer variant, and
+  returns AsyncSequence. For our pipeline, this could replace custom Metal compute shaders for standard transforms (color space conversion, resize). The prompt now says "evaluate VTFrameProcessor first,
+  custom shaders only for what it can't do."
+  2. AsyncStream .bufferingNewest(1) was already correct. The original feedback's .dropOldest describes the behavior but isn't the API name. Our prompt already had the right name.
+  3. Sendable is a real constraint we missed. Swift 6 enforces Sendable at compile time. CVPixelBuffer is an ObjC type that isn't inherently Sendable. Every time a frame buffer crosses an actor boundary
+  (camera queue → ML actor → renderer), the compiler will reject it unless we design a Sendable strategy. This is a genuine architectural concern that could cause dozens of compiler errors if not designed
+  upfront.
+  ─────────────────────────────────────────────────
+
+  Summary of Changes
+
+  ┌───────────────────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────┐
+  │                        Correction                         │                                       Files Updated                                       │
+  ├───────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
+  │ VTFrameProcessor is real — evaluate before custom shaders │ Prompt 2 (reference architecture, pipeline deliverable, quality gates), reference file    │
+  ├───────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Sendable strategy for CVPixelBuffer across actors         │ Prompt 2 (reference architecture, concurrency deliverable, quality gates), reference file │
+  ├───────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
+  │ VTFrameProcessor warning removed                          │ Prompt 2 (reference architecture)                                                         │
+  └───────────────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────┘
+
+  The AsyncStream buffering policy was already correctly named in our prompts — no change needed there.
+
+
+## 2026-04-12 gemini feedback on 2026 ios dev and latest frameworks/languagues to use
 
  ★ Insight ─────────────────────────────────────
   Three findings that materially changed our prompts:
