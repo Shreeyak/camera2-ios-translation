@@ -41,19 +41,19 @@ cd "$SOURCE_REPO"
 # Full Kotlin source for behavioral analysis
 echo "Packing Kotlin layer (full)..."
 repomix --include "packages/*/android/**/*.kt,android/**/*.kt" \
-    --ignore "build/**" --ignore ".gradle/**" \
+    --ignore "build/**" --ignore "build-test/**" --ignore ".gradle/**" \
     --output "$SCRIPT_DIR/packed/kotlin-full.xml" 2>/dev/null || \
 repomix --include "packages/*/android/**/*.kt" --include "android/**/*.kt" \
-    --ignore "build/**" --ignore ".gradle/**" \
+    --ignore "build/**" --ignore "build-test/**" --ignore ".gradle/**" \
     --output "$SCRIPT_DIR/packed/kotlin-full.xml"
 
 # Full C++ source
 echo "Packing C++ layer (full)..."
 repomix --include "**/*.cpp,**/*.h" \
-    --ignore "build/**" \
+    --ignore "build/**" --ignore "build-test/**" \
     --output "$SCRIPT_DIR/packed/cpp-full.xml" 2>/dev/null || \
 repomix --include "**/*.cpp" --include "**/*.h" \
-    --ignore "build/**" \
+    --ignore "build/**" --ignore "build-test/**" \
     --output "$SCRIPT_DIR/packed/cpp-full.xml"
 
 # Full shader source
@@ -72,22 +72,24 @@ repomix --include "**/pigeon/**/*.dart" --include "**/pigeons/**/*.dart" \
 # Dart plugin API (compressed)
 echo "Packing Dart plugin API (compressed)..."
 repomix --compress --include "packages/*/lib/**/*.dart" \
-    --ignore ".dart_tool/**" --ignore "build/**" --ignore "*.g.dart" --ignore "*.mocks.dart" \
+    --ignore ".dart_tool/**" --ignore "build/**" --ignore "build-test/**" \
+    --ignore "*.g.dart" --ignore "*.mocks.dart" \
     --output "$SCRIPT_DIR/packed/dart-plugin-compressed.xml"
 
 # Dart app layer (compressed)
 echo "Packing Dart app layer (compressed)..."
 repomix --compress --include "lib/**/*.dart" \
-    --ignore ".dart_tool/**" --ignore "build/**" --ignore "*.g.dart" --ignore "*.mocks.dart" \
+    --ignore ".dart_tool/**" --ignore "build/**" --ignore "build-test/**" \
+     --ignore "*.g.dart" --ignore "*.mocks.dart" \
     --output "$SCRIPT_DIR/packed/dart-app-compressed.xml"
 
 # Build configuration
 echo "Packing build configuration..."
 repomix --include "**/build.gradle*,**/CMakeLists.txt,pubspec.yaml,**/AndroidManifest.xml" \
-    --ignore "build/**" \
+    --ignore "build/**" --ignore "build-test/**" \
     --output "$SCRIPT_DIR/packed/build-config.xml" 2>/dev/null || \
 repomix --include "**/build.gradle*" --include "**/CMakeLists.txt" --include "pubspec.yaml" --include "**/AndroidManifest.xml" \
-    --ignore "build/**" \
+    --ignore "build/**" --ignore "build-test/**" \
     --output "$SCRIPT_DIR/packed/build-config.xml"
 
 echo ""

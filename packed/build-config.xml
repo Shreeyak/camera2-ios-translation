@@ -1,0 +1,479 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files and files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: **/build.gradle*, **/CMakeLists.txt, pubspec.yaml, **/AndroidManifest.xml
+- Files matching these patterns are excluded: build-test/**
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+android/
+  app/
+    src/
+      debug/
+        AndroidManifest.xml
+      main/
+        AndroidManifest.xml
+      profile/
+        AndroidManifest.xml
+    build.gradle.kts
+  build.gradle.kts
+packages/
+  cambrian_camera/
+    android/
+      src/
+        debug/
+          AndroidManifest.xml
+        main/
+          cpp/
+            CMakeLists.txt
+          AndroidManifest.xml
+      build.gradle.kts
+pubspec.yaml
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="android/app/src/debug/AndroidManifest.xml">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The INTERNET permission is required for development. Specifically,
+         the Flutter tool needs it to communicate with the running application
+         to allow setting breakpoints, to provide hot reload, etc.
+    -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+</manifest>
+</file>
+
+<file path="android/app/src/main/AndroidManifest.xml">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="true"/>
+    <application
+        android:label="camera2_flutter_demo"
+        android:name="${applicationName}"
+        android:icon="@android:mipmap/sym_def_app_icon">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>
+</file>
+
+<file path="android/app/src/profile/AndroidManifest.xml">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The INTERNET permission is required for development. Specifically,
+         the Flutter tool needs it to communicate with the running application
+         to allow setting breakpoints, to provide hot reload, etc.
+    -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+</manifest>
+</file>
+
+<file path="android/app/build.gradle.kts">
+plugins {
+    id("com.android.application")
+    id("kotlin-android")
+    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    id("dev.flutter.flutter-gradle-plugin")
+}
+
+android {
+    namespace = "com.example.camera2_flutter_demo"
+    compileSdk = flutter.compileSdkVersion
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    defaultConfig {
+        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+        applicationId = "com.example.camera2_flutter_demo"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        minSdk = 33
+        targetSdk = 36
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+
+    buildTypes {
+        release {
+            // TODO: Add your own signing config for the release build.
+            // Signing with the debug keys for now, so `flutter run --release` works.
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}
+</file>
+
+<file path="android/build.gradle.kts">
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+val newBuildDir: Directory =
+    rootProject.layout.buildDirectory
+        .dir("../../build")
+        .get()
+rootProject.layout.buildDirectory.value(newBuildDir)
+
+subprojects {
+    val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
+    project.layout.buildDirectory.value(newSubprojectBuildDir)
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+tasks.register<Delete>("clean") {
+    delete(rootProject.layout.buildDirectory)
+}
+
+// Allow kotlin-language-server to find a `classes` task
+tasks.register("classes") {
+    dependsOn(":app:compileDebugKotlin")
+}
+</file>
+
+<file path="packages/cambrian_camera/android/src/debug/AndroidManifest.xml">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug-only: allows ADB broadcasts to start/stop recording without UI interaction.
+             Excluded from release builds by virtue of living in src/debug/. -->
+        <receiver
+            android:name="com.cambrian.camera.VideoRecordingReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.cambrian.camera.START_RECORDING" />
+                <action android:name="com.cambrian.camera.STOP_RECORDING" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
+</file>
+
+<file path="pubspec.yaml">
+name: camera2_flutter_demo
+description: "A demo for camera2 library in Flutter."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  permission_handler: ^12.0.1
+  material_symbols_icons: ^4.2906.0
+  google_fonts: ^8.0.2
+  cambrian_camera:
+    path: packages/cambrian_camera
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+</file>
+
+<file path="packages/cambrian_camera/android/src/main/AndroidManifest.xml">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Camera permission and features are declared here so the plugin's
+         requirements are visible to the app's merged manifest. The app
+         must also request CAMERA permission at runtime on API 23+. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
+
+    <application>
+        <receiver
+            android:name=".LogLevelReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.cambrian.camera.SET_LOG_LEVEL" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
+</file>
+
+<file path="packages/cambrian_camera/android/build.gradle.kts">
+plugins {
+    id("com.android.library")
+    id("kotlin-android")
+}
+
+android {
+    namespace = "com.cambrian.camera"
+    // API 35 for latest Camera2 features; minSdk 33 targets Android 13+.
+    compileSdk = 35
+    // NDK version matching the OpenCV prebuilt used by the C++ pipeline.
+    ndkVersion = "27.0.12077973"
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
+
+    defaultConfig {
+        // Targets OPD2403 hardware running API 33+. Single-device target for now.
+        minSdk = 33
+        ndk {
+            // OpenCV prebuilt static libs are arm64-v8a only, so this module
+            // currently packages native code for arm64-v8a devices only.
+            //
+            // This intentionally excludes x86/x86_64 (including emulators) and
+            // other 32-bit ABIs from the NDK build and final AAR/APK packaging.
+            // To add broader device/emulator support, matching OpenCV and pipeline
+            // prebuilts would be needed for each additional ABI.
+            abiFilters += "arm64-v8a"
+        }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        externalNativeBuild {
+            cmake {
+                // c++_shared: makes AGP package libc++_shared.so in the APK
+                // so the dynamic linker can resolve it at runtime.
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    // C++ JNI bridge and image pipeline.
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+}
+
+dependencies {
+    // androidx.lifecycle is used by the Flutter embedding; listed here so the IDE
+    // can resolve lifecycle types during development. The Flutter plugin-loader
+    // script injects flutter.jar (FlutterPlugin, ActivityAware, TextureRegistry, etc.)
+    // as compileOnly automatically when this module is included by the host app.
+    compileOnly("androidx.lifecycle:lifecycle-common:2.7.0")
+    // ProcessLifecycleOwner (used for automatic camera pause/resume on app background).
+    implementation("androidx.lifecycle:lifecycle-process:2.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    testImplementation("org.mockito:mockito-core:5.3.1")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.1.0")
+    testImplementation("junit:junit:4.13.2")
+}
+</file>
+
+<file path="packages/cambrian_camera/android/src/main/cpp/CMakeLists.txt">
+cmake_minimum_required(VERSION 3.22.1)
+project(cambrian_camera)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_library(cambrian_camera SHARED
+    src/CameraBridge.cpp
+    src/GpuRenderer.cpp
+    src/ImagePipeline.cpp
+    src/fpng.cpp
+)
+
+# Pixel-processing code needs optimization even in Debug — without it, our
+# per-pixel loops run ~20x slower than OpenCV's pre-compiled (always -O2) functions.
+# -O2 baseline for all configs; -O3 + -ffast-math for Release.
+# -ffast-math enables NEON FMA; safe for uint8 [0,255] pixel math.
+target_compile_options(cambrian_camera PRIVATE
+    -O2 -ftree-vectorize
+    $<$<CONFIG:Release>:-O3 -ffast-math>
+    $<$<CONFIG:RelWithDebInfo>:-ffast-math>
+)
+
+target_include_directories(cambrian_camera PRIVATE include)
+
+# ---------------------------------------------------------------------------
+# libjpeg-turbo — build from source so we get a known version with NEON
+# enabled by the NDK toolchain. libjpeg-turbo explicitly prohibits
+# add_subdirectory/FetchContent, so we use ExternalProject_Add instead and
+# expose the resulting static library as an IMPORTED target.
+# Only needed for the Android target; the host test build does not encode images.
+# ---------------------------------------------------------------------------
+if(ANDROID)
+    include(ExternalProject)
+
+    set(LIBJPEG_TURBO_INSTALL_DIR ${CMAKE_BINARY_DIR}/libjpeg-turbo-install)
+    # Pre-create the include directory so CMake's INTERFACE_INCLUDE_DIRECTORIES
+    # validation passes at configure time (the dir is populated at build time).
+    file(MAKE_DIRECTORY ${LIBJPEG_TURBO_INSTALL_DIR}/include)
+
+    ExternalProject_Add(libjpeg_turbo_ext
+        GIT_REPOSITORY https://github.com/libjpeg-turbo/libjpeg-turbo.git
+        GIT_TAG        3.0.3
+        GIT_SHALLOW    TRUE
+        CMAKE_ARGS
+            -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+            -DANDROID_ABI=${ANDROID_ABI}
+            -DANDROID_NDK=${ANDROID_NDK}
+            -DANDROID_PLATFORM=${ANDROID_PLATFORM}
+            -DANDROID_STL=${ANDROID_STL}
+            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+            -DCMAKE_INSTALL_PREFIX=${LIBJPEG_TURBO_INSTALL_DIR}
+            # Build the static TurboJPEG library only.
+            -DENABLE_SHARED=OFF
+            -DENABLE_STATIC=ON
+            -DWITH_TURBOJPEG=ON
+            -DWITH_JAVA=OFF
+            -DWITH_TURBOJPEG_UTILS=OFF
+        BUILD_BYPRODUCTS
+            ${LIBJPEG_TURBO_INSTALL_DIR}/lib/libturbojpeg.a
+    )
+
+    add_library(turbojpeg_static STATIC IMPORTED GLOBAL)
+    add_dependencies(turbojpeg_static libjpeg_turbo_ext)
+    set_target_properties(turbojpeg_static PROPERTIES
+        IMPORTED_LOCATION        ${LIBJPEG_TURBO_INSTALL_DIR}/lib/libturbojpeg.a
+        INTERFACE_INCLUDE_DIRECTORIES ${LIBJPEG_TURBO_INSTALL_DIR}/include
+    )
+
+    add_dependencies(cambrian_camera libjpeg_turbo_ext)
+endif()
+
+target_link_libraries(cambrian_camera
+    android
+    log
+    GLESv3
+    EGL
+    $<$<BOOL:${ANDROID}>:turbojpeg_static>
+)
+
+if(NOT ANDROID)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG        v1.14.0
+    )
+    FetchContent_MakeAvailable(googletest)
+
+    add_executable(cambrian_camera_tests
+        test/TrackerDimTest.cpp
+        test/SinkRoutingTest.cpp
+        src/ImagePipeline.cpp
+    )
+
+    target_include_directories(cambrian_camera_tests PRIVATE
+        include
+        src
+        test/stubs   # provides android/log.h and android/native_window.h stubs
+    )
+
+    target_link_libraries(cambrian_camera_tests
+        GTest::gtest_main
+        # Note: android, log, EGL, GLESv3 are Android-only — not linked for host build
+    )
+
+    include(GoogleTest)
+    gtest_discover_tests(cambrian_camera_tests)
+endif()
+</file>
+
+</files>

@@ -1,0 +1,1175 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files and files not matching ignore patterns, combined into a single document by Repomix.
+The content has been processed where content has been compressed (code blocks are separated by ⋮---- delimiter).
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: packages/*/lib/**/*.dart
+- Files matching these patterns are excluded: *.mocks.dart
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Content has been compressed - code blocks are separated by ⋮---- delimiter
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+packages/
+  cambrian_camera/
+    lib/
+      src/
+        calibration.dart
+        cambrian_camera_controller.dart
+        camera_settings_serializer.dart
+        camera_settings.dart
+        camera_state.dart
+        frame_result.dart
+        messages.g.dart
+      cambrian_camera.dart
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="packages/cambrian_camera/lib/src/camera_settings_serializer.dart">
+import 'camera_settings.dart';
+⋮----
+/// Serializes [CameraSettings] updates to the platform channel.
+///
+/// Uses a latest-value-wins strategy: if a new value arrives while a previous
+/// call is in-flight, the pending value is replaced (not queued). This ensures
+/// there is no artificial latency accumulation from rapid slider scrubbing.
+⋮----
+/// There is no time-based debounce — every value that is not superseded will
+/// eventually be sent.
+class CameraSettingsSerializer {
+⋮----
+/// Callback invoked with the latest settings when a send slot is free.
+⋮----
+/// Schedules [settings] for delivery. If a call is already in-flight, the
+/// previous pending value (if any) is discarded and [settings] becomes the
+/// new pending value.
+void send(CameraSettings settings) {
+⋮----
+void _dispatch(CameraSettings settings) {
+⋮----
+// Discard the pending value so a stale setting is not sent after an error.
+// Error details are delivered via the camera error stream.
+⋮----
+/// Stops further sends. Call when the camera is closed.
+void dispose() {
+</file>
+
+<file path="packages/cambrian_camera/lib/src/frame_result.dart">
+// Copyright (c) 2025 Cambrian. All rights reserved.
+⋮----
+/// Actual sensor values reported by the camera hardware after each frame.
+///
+/// All fields are nullable — null means the hardware did not report that value
+/// for this frame (e.g. focus distance is null on fixed-focus cameras).
+⋮----
+/// Delivered via [CambrianCamera.frameResultStream] at approximately 3 Hz.
+class FrameResult {
+⋮----
+/// Actual sensor sensitivity (ISO) used for this frame.
+⋮----
+/// Actual exposure duration in nanoseconds used for this frame.
+⋮----
+/// Actual focus distance in diopters (1/metres). 0.0 = infinity.
+⋮----
+/// Red channel gain from COLOR_CORRECTION_GAINS.
+⋮----
+/// Green channel gain (average of greenEven and greenOdd).
+⋮----
+/// Blue channel gain from COLOR_CORRECTION_GAINS.
+</file>
+
+<file path="packages/cambrian_camera/lib/cambrian_camera.dart">
+/// Cambrian camera Flutter plugin.
+///
+/// Exposes a Camera2-backed camera with C++ post-processing and a generic
+/// consumer sink API for native frame consumers.
+⋮----
+/// Typical usage:
+/// ```dart
+/// import 'package:cambrian_camera/cambrian_camera.dart';
+⋮----
+/// final camera = await CambrianCamera.open();
+/// // ...
+/// await camera.close();
+/// ```
+⋮----
+export 'src/calibration.dart'
+    show
+        RgbSample,
+        WbGains,
+        BbOffsets,
+        WbCalibrationResult,
+        BbCalibrationResult;
+export 'src/cambrian_camera_controller.dart' show CambrianCamera;
+export 'src/frame_result.dart' show FrameResult;
+export 'src/camera_settings.dart'
+    show
+        AutoValue,
+        Auto,
+        Manual,
+        WhiteBalance,
+        WbAuto,
+        WbLocked,
+        WbManual,
+        CameraSettings,
+        ProcessingParams,
+        NoiseReductionMode,
+        EdgeMode;
+export 'src/camera_state.dart'
+    show
+        CameraState,
+        CameraError,
+        CameraErrorCode,
+        CameraCapabilities,
+        CameraSize,
+        CameraTextureInfo,
+        quarterTurnsFromDisplayRotation,
+        RecordingState;
+</file>
+
+<file path="packages/cambrian_camera/lib/src/camera_settings.dart">
+import 'messages.g.dart';
+⋮----
+// ---------------------------------------------------------------------------
+// Auto/manual sealed types
+⋮----
+/// Represents a camera setting that supports both automatic and manual control.
+///
+/// Used for settings where Camera2 can auto-manage the value (e.g. ISO,
+/// exposure, focus) but the user may want to override with a specific value.
+⋮----
+/// - `null` in [CameraSettings] = don't change this setting.
+/// - [Auto] = let Camera2 control this setting automatically.
+/// - [Manual] = use the specified value.
+sealed class AutoValue<T> {
+⋮----
+/// Let Camera2 control this setting automatically.
+class Auto<T> extends AutoValue<T> {
+⋮----
+/// Use a specific value, overriding Camera2 auto-control.
+class Manual<T> extends AutoValue<T> {
+⋮----
+// White balance sealed type
+⋮----
+/// White balance control mode.
+⋮----
+/// - `null` in [CameraSettings] = don't change white balance.
+/// - [WbAuto] = Camera2 AWB algorithm runs continuously.
+/// - [WbLocked] = freeze AWB at current values.
+/// - [WbManual] = apply user-computed R/G/B gain multipliers, bypassing AWB.
+sealed class WhiteBalance {
+⋮----
+/// Camera2 AWB algorithm runs continuously.
+class WbAuto extends WhiteBalance {
+⋮----
+/// Freeze the current AWB gains in place.
+class WbLocked extends WhiteBalance {
+⋮----
+/// Apply user-computed white balance gain multipliers, bypassing Camera2 AWB.
+⋮----
+/// Gains are typically computed by selecting a neutral (grey/white) patch in
+/// the image and calculating correction factors relative to the green channel.
+class WbManual extends WhiteBalance {
+⋮----
+/// Red channel gain multiplier.
+⋮----
+/// Green channel gain multiplier (usually 1.0 as the reference channel).
+⋮----
+/// Blue channel gain multiplier.
+⋮----
+// Camera2 mode enums
+⋮----
+/// Camera2 `CONTROL_NOISE_REDUCTION_MODE_*` values.
+/// Index matches the Camera2 integer constant directly.
+enum NoiseReductionMode {
+off,           // 0
+fast,          // 1
+highQuality,   // 2
+minimal,       // 3
+zeroShutterLag, // 4
+⋮----
+/// Camera2 `CONTROL_EDGE_MODE_*` values.
+⋮----
+enum EdgeMode {
+⋮----
+zeroShutterLag, // 3
+⋮----
+// CameraSettings
+⋮----
+/// ISP-level camera settings mapped to Camera2 CaptureRequest keys.
+⋮----
+/// All fields are nullable. `null` means "don't change this setting" — the
+/// Kotlin side accumulates settings, so omitted fields retain their previous
+/// value across calls.
+⋮----
+/// Auto-capable settings use sealed types ([AutoValue], [WhiteBalance]) to
+/// make the three states explicit:
+/// - `null` = don't change
+/// - auto variant = let Camera2 control it
+/// - manual variant = use a specific value
+⋮----
+/// Non-auto settings use plain nullable types where `null` = don't change.
+⋮----
+/// ## ISO + Exposure coupling
+⋮----
+/// [iso] and [exposureTimeNs] share a single Camera2 flag (`CONTROL_AE_MODE`):
+⋮----
+/// - **Auto is contagious:** setting either to [Auto] propagates to the other
+///   automatically on the native side. You may send only one in a call:
+///   ```dart
+///   // Switches both iso AND exposureTimeNs to auto:
+///   camera.updateSettings(CameraSettings(iso: AutoValue.auto()));
+///   ```
+/// - **Manual latches from last AE values:** you only need to set one field to
+///   [Manual] — the partner is automatically seeded with the last sensor value
+///   that Camera2's AE algorithm was using, so brightness is continuous:
+⋮----
+///   // Only iso is set; exposureTimeNs is filled from the last AE result:
+///   camera.updateSettings(CameraSettings(iso: AutoValue.manual(800)));
+⋮----
+///   You can still provide both explicitly if you want full control:
+⋮----
+///   camera.updateSettings(CameraSettings(
+///     iso: AutoValue.manual(800),
+///     exposureTimeNs: AutoValue.manual(16666666), // 1/60 s
+///   ));
+⋮----
+///   If no capture result has arrived yet (camera just opened), single-field
+///   manual is rejected with [CameraErrorCode.settingsConflict].
+/// - **Auto wins over manual in a mixed update:** if one field is [Auto] and
+///   the other is [Manual] in the same call, both switch to auto. This handles
+///   the common UI slider case where moving the ISO slider to auto emits
+///   `{iso: Auto, exposure: Manual(lastValue)}` — the stale manual value on
+///   the exposure slider is correctly discarded.
+⋮----
+/// Quick reference:
+⋮----
+/// | Intent | Expression |
+/// |---|---|
+/// | Slide ISO to manual — exposure continuous | `CameraSettings(iso: AutoValue.manual(800))` |
+/// | Set both to specific values | `CameraSettings(iso: AutoValue.manual(800), exposureTimeNs: AutoValue.manual(...))` |
+/// | Switch back to auto | `CameraSettings(iso: AutoValue.auto())` — or either field; auto wins |
+/// | Mixed (one auto, one manual) | Both go to auto — auto wins |
+⋮----
+/// ## EV compensation
+⋮----
+/// [evCompensation] is applied by the AE algorithm and has **no effect** when
+/// either [iso] or [exposureTimeNs] is manual (AE is disabled in that mode).
+class CameraSettings {
+⋮----
+/// Sensor sensitivity (e.g. 100–3200).
+⋮----
+/// [Auto] = Camera2 AE controls ISO. [Manual] = fixed value.
+⋮----
+/// Setting this to [Auto] pulls [exposureTimeNs] to auto as well. Setting
+/// this to [Manual] latches [exposureTimeNs] from the last AE capture result
+/// if [exposureTimeNs] is not also provided. If both are provided and one is
+/// [Auto], both switch to auto.
+⋮----
+/// Exposure duration in nanoseconds.
+⋮----
+/// [Auto] = Camera2 AE controls shutter speed. [Manual] = fixed value.
+⋮----
+/// Setting this to [Auto] pulls [iso] to auto as well. Setting this to
+/// [Manual] latches [iso] from the last AE capture result if [iso] is not
+/// also provided. If both are provided and one is [Auto], both switch to auto.
+⋮----
+/// Focus distance in diopters (0 = infinity).
+/// [Auto] = continuous autofocus. [Manual] = fixed distance.
+⋮----
+/// White balance mode.
+/// [WbAuto] = Camera2 AWB. [WbLocked] = freeze current. [WbManual] = user gains.
+⋮----
+/// Zoom ratio (1.0 = no zoom). Null = don't change.
+⋮----
+/// Noise reduction mode applied by Camera2. Null = don't change.
+⋮----
+/// Edge enhancement mode applied by Camera2. Null = don't change.
+⋮----
+/// Exposure compensation in AE steps. Null = don't change.
+⋮----
+/// Applied by the AE algorithm — **has no effect** when [iso] or
+/// [exposureTimeNs] is manual (AE is disabled in that mode).
+⋮----
+/// Enable GPU raw (passthrough) stream. Null = don't change (preserves prior setting).
+/// Only meaningful at open() time; changes after open() are ignored.
+⋮----
+/// Requested height of the GPU raw stream in pixels. Null = don't change. 0 = use default.
+/// Only meaningful when [enableRawStream] is true.
+⋮----
+/// Creates a copy of this settings object with specified fields replaced.
+⋮----
+/// Omitted fields preserve their original values.
+CameraSettings copyWith({
+⋮----
+/// Returns a summary string of non-null fields for diagnostic logging.
+⋮----
+String toString() {
+⋮----
+/// Serializes to the Pigeon transport type.
+⋮----
+/// Sealed types are encoded as mode strings ("auto"/"manual"/"locked")
+/// alongside their value fields. Null fields are omitted entirely —
+/// the Kotlin side interprets missing fields as "don't change."
+CamSettings toCam() {
+// ISO
+⋮----
+// Exposure
+⋮----
+// Focus
+⋮----
+// White balance
+⋮----
+/// C++ pipeline processing parameters.
+/// Applied fire-and-forget: the next frame picks up any changes.
+class ProcessingParams {
+ProcessingParams({
+⋮----
+/// Per-channel black level subtraction in [0.0, 0.5].
+⋮----
+/// Gamma correction exponent in [0.1, 4.0]. 1.0 = identity.
+⋮----
+/// Brightness in [-1.0, +1.0]. 0.0 = identity.
+/// Positive: reverse-gamma curve lift (shadows and midtones raised nonlinearly).
+/// Negative: linear dim (multiplies by 1 + b×0.75).
+⋮----
+/// Contrast in [-1.0, +1.0]. 0.0 = identity.
+/// Uses a piecewise sigmoid: positive values squeeze the tonal curve (S-curve),
+/// negative values flatten it (expand toward grey). The shader guards against
+/// division by zero at the ±1.0 endpoints.
+⋮----
+/// Saturation adjustment in [-1.0, +1.0]. 0.0 = no change (identity/full natural color).
+/// -1.0 = greyscale (zero saturation), +1.0 = boosted saturation (2x mix factor).
+⋮----
+void _validate() {
+// NaN checks — all double fields must be finite numbers.
+⋮----
+// Range checks.
+⋮----
+/// Returns a summary string for diagnostic logging.
+⋮----
+String toString() =>
+⋮----
+CamProcessingParams toCam() => CamProcessingParams(
+⋮----
+ProcessingParams copyWith({
+</file>
+
+<file path="packages/cambrian_camera/lib/src/calibration.dart">
+/// Pure calibration math for White Balance and Black Balance.
+///
+/// These functions contain no Flutter or camera dependencies — they operate
+/// only on numeric inputs and return new values, making them independently
+/// testable.
+⋮----
+/// High-level callers should use [CambrianCamera.calibrateWhiteBalance] and
+/// [CambrianCamera.calibrateBlackBalance] instead of calling these primitives
+/// directly.
+⋮----
+/// The trimmed-mean R, G, B of the 96×96 center patch sampled from the GPU
+/// framebuffer. All values are normalized to [0.0, 1.0].
+⋮----
+/// WB gain triple: (gainR, gainG, gainB).
+⋮----
+/// BB accumulated offset triple: (blackR, blackG, blackB).
+⋮----
+/// Result returned by [CambrianCamera.calibrateWhiteBalance].
+⋮----
+/// [gains] — converged R/G/B gain multipliers; pass to [WhiteBalance.manual].
+/// [patchBefore] — mean RGB of the 96×96 center patch sampled before any
+///   corrections were applied. Each channel in [0.0, 1.0].
+/// [patchAfter] — mean RGB of the 96×96 center patch sampled after the final
+///   gains settled. Useful for before/after display in the UI.
+⋮----
+/// Result returned by [CambrianCamera.calibrateBlackBalance].
+⋮----
+/// [offsets] — converged R/G/B black-level offsets; store and toggle via
+///   [ProcessingParams.copyWith].
+⋮----
+///   offsets were applied. Each channel in [0.0, 1.0].
+⋮----
+///   offsets settled.
+⋮----
+// ── Shared calibration timing ────────────────────────────────────────────────
+⋮----
+/// Milliseconds to wait between calibration loop iterations.
+⋮----
+/// ≈6 frames at 30 fps — enough time for Camera2 to apply new gains/offsets
+/// and expose a fresh frame before the next patch sample is taken.
+⋮----
+// ── White Balance ────────────────────────────────────────────────────────────
+⋮----
+/// Channels below this value are treated as fully clipped — avoids
+/// divide-by-zero in gain and error calculations.
+⋮----
+/// Per-channel error threshold at which WB is considered converged.
+⋮----
+/// 0.01 ≈ 1% deviation — imperceptible to the human eye under typical
+/// viewing conditions.
+⋮----
+/// Hard cap on WB loop iterations.
+⋮----
+/// At [kCalibrationSettleMs] per step, 10 iterations = up to 2 s total;
+/// neutral scenes typically converge in 3–5 steps.
+⋮----
+/// Proportional error for WB: max per-channel deviation from green, normalized
+/// by green (clamped to avoid divide-by-zero).
+⋮----
+/// Returns 0.0 when the sample is exactly neutral (r == g == b).
+double wbError(RgbSample s) {
+⋮----
+/// Applies one proportional-correction step to the WB gains.
+⋮----
+/// Green is the fixed reference channel. Each iteration scales gainR and gainB
+/// by the ratio `green / channel` so that subsequent frames push the sampled
+/// patch toward neutral.
+⋮----
+/// Channels below [_kClipGuard] are skipped to avoid divide-by-zero on a
+/// fully clipped channel.
+WbGains wbStep(WbGains gains, RgbSample s) {
+⋮----
+// ── Black Balance ────────────────────────────────────────────────────────────
+⋮----
+/// Per-channel error threshold at which BB is considered converged.
+⋮----
+/// 0.01 ≈ 1% residual brightness — below the eye's detection threshold for
+/// black-level lift under normal display conditions.
+⋮----
+/// Hard cap on BB loop iterations.
+⋮----
+/// a dark scene typically converges in 2–4 steps.
+⋮----
+/// Maximum channel value in [s]. When this is below [kBbTolerance] the black
+/// point is considered calibrated and no further accumulation is needed.
+double bbError(RgbSample s) =>
+⋮----
+/// Accumulates one BB correction step.
+⋮----
+/// The GPU shader subtracts the accumulated offset: `output = max(input − acc, 0)`.
+/// Adding `sample` to the accumulator moves the black point down by the
+/// current residual; the next sample will measure what remains.
+BbOffsets bbStep(BbOffsets acc, RgbSample s) =>
+</file>
+
+<file path="packages/cambrian_camera/lib/src/camera_state.dart">
+import 'package:flutter/widgets.dart';
+import 'messages.g.dart';
+⋮----
+/// Lifecycle states of the camera.
+enum CameraState {
+/// Camera is not open.
+⋮----
+/// Camera is initializing (opening device, configuring session).
+⋮----
+/// Camera is configured and actively streaming frames.
+⋮----
+/// An error occurred; the library is attempting automatic recovery.
+/// The app may show a "reconnecting…" indicator.
+⋮----
+/// Camera session is paused (Dart-initiated). The [CameraDevice] is still
+/// held open for fast resume. Call [CambrianCamera.resume] to restart.
+⋮----
+/// Camera is fully released because the app moved to the background
+/// (process [onStop]). The device is closed so other apps can use it.
+/// The library will automatically reopen when the app returns to the
+/// foreground, or when Dart calls [CambrianCamera.resume].
+⋮----
+/// A fatal error occurred. The app must call [CambrianCamera.close] and
+/// optionally reopen the camera.
+⋮----
+static CameraState fromString(String s) => switch (s) {
+⋮----
+/// The recording state emitted by [CambrianCamera.recordingStateStream].
+enum RecordingState {
+/// Recording is active.
+⋮----
+/// Recording is idle (not started, or cleanly stopped).
+⋮----
+/// A recording error occurred.
+⋮----
+/// Creates a [RecordingState] from the wire string sent by the platform.
+static RecordingState fromString(String value) => switch (value) {
+⋮----
+_ => RecordingState.error, // safe default
+⋮----
+/// Identifies the type of camera error.
+///
+/// Values are the Pigeon-generated [CamErrorCode] enum serialized as integer
+/// indices over the wire — do NOT reorder; only append before [CamErrorCode.unknown].
+⋮----
+/// Describes a camera error.
+⋮----
+/// Non-fatal errors ([isFatal] == false) are informational: the library is
+/// recovering automatically. Fatal errors require the app to close the camera.
+class CameraError {
+⋮----
+String toString() => 'CameraError($code, fatal=$isFatal): $message';
+⋮----
+/// A camera resolution expressed as integer pixel dimensions.
+⋮----
+class CameraSize {
+⋮----
+String toString() => '${width}x$height';
+⋮----
+/// Device capabilities reported after [CambrianCamera.open].
+⋮----
+class CameraCapabilities {
+⋮----
+/// Empty placeholder used during the open() factory before getCapabilities completes.
+⋮----
+/// All supported YUV_420_888 stream resolutions, sorted descending by area.
+⋮----
+/// Flutter texture ID for the GPU raw stream (passthrough, no color adjustments).
+/// 0 if raw stream is disabled.
+⋮----
+/// Actual computed width of the GPU raw stream (pixels). 0 if raw stream is disabled.
+⋮----
+/// Requested height of the GPU raw stream (pixels). 0 if raw stream is disabled.
+⋮----
+/// Width of the GPU processed stream texture (pixels). Matches the largest 4:3 YUV size.
+⋮----
+/// Height of the GPU processed stream texture (pixels).
+⋮----
+/// Describes a GPU texture stream ready for display.
+⋮----
+/// Use with Flutter's [Texture] widget:
+/// ```dart
+/// Texture(textureId: info.textureId)
+/// ```
+/// [width] and [height] are the native pixel dimensions of the texture.
+/// Use [CambrianCamera.getDisplayRotation] to get the rotation needed.
+⋮----
+class CameraTextureInfo {
+⋮----
+/// Converts display rotation degrees to [RotatedBox.quarterTurns].
+⋮----
+/// [displayRotationDeg] is the value returned by [CambrianCamera.getDisplayRotation]:
+/// degrees clockwise from portrait: 0, 90, 180, or 270.
+⋮----
+/// The GPU pipeline outputs landscape-right frames (ROTATION_270 perspective).
+/// See GpuPipeline.kt: the fixed 90° CW UV rotation in the shader normalises
+/// every frame to landscape-right orientation, independent of device rotation.
+/// This function accounts for that to compute the correct number of 90° CW
+/// rotations to apply to the preview texture:
+⋮----
+///   0°  (portrait)          → 1 turn  (90° CW)
+///   90° (landscape-left)    → 2 turns (180° — landscape-left from landscape-right)
+///   180° (reverse-portrait) → 3 turns (90° CCW)
+///   270° (landscape-right)  → 0 turns (no rotation — matches GPU output)
+int quarterTurnsFromDisplayRotation(int displayRotationDeg) => switch (displayRotationDeg) {
+90  => 2,   // landscape-left — 180° from landscape-right GPU output
+180 => 3,   // reverse-portrait
+270 => 0,   // landscape-right — matches GPU output directly
+_   => 1,   // portrait
+</file>
+
+<file path="packages/cambrian_camera/lib/src/messages.g.dart">
+// Copyright (c) 2025 Cambrian. All rights reserved.
+// Autogenerated from Pigeon (v22.7.4), do not edit directly.
+// See also: https://pub.dev/packages/pigeon
+// ignore_for_file: public_member_api_docs, non_constant_identifier_names, avoid_as, unused_import, unnecessary_parenthesis, prefer_null_aware_operators, omit_local_variable_types, unused_shown_name, unnecessary_import, no_leading_underscores_for_local_identifiers
+⋮----
+import 'dart:async';
+import 'dart:typed_data' show Float64List, Int32List, Int64List, Uint8List;
+⋮----
+import 'package:flutter/foundation.dart' show ReadBuffer, WriteBuffer;
+import 'package:flutter/services.dart';
+⋮----
+PlatformException _createConnectionError(String channelName) {
+⋮----
+List<Object?> wrapResponse({Object? result, PlatformException? error, bool empty = false}) {
+⋮----
+/// Typed error codes for camera errors delivered via [CameraFlutterApi.onError].
+///
+/// Values are serialized as integer indices — do NOT reorder or insert in the
+/// middle; only append before [unknown] to preserve wire compatibility.
+enum CamErrorCode {
+⋮----
+class CamSize {
+⋮----
+Object encode() {
+⋮----
+static CamSize decode(Object result) {
+⋮----
+class CamSettings {
+⋮----
+/// "auto" | "manual" | null (don't change).
+⋮----
+/// Sensor sensitivity value when isoMode == "manual".
+⋮----
+/// Exposure duration in nanoseconds when exposureMode == "manual".
+⋮----
+/// Focus distance in diopters when focusMode == "manual".
+⋮----
+/// "auto" | "locked" | "manual" | null (don't change).
+⋮----
+/// Red gain multiplier when wbMode == "manual".
+⋮----
+/// Green gain multiplier when wbMode == "manual".
+⋮----
+/// Blue gain multiplier when wbMode == "manual".
+⋮----
+/// Zoom ratio (1.0 = no zoom). Null = don't change.
+⋮----
+/// Camera2 NOISE_REDUCTION_MODE_* constant. Null = don't change.
+⋮----
+/// Camera2 EDGE_MODE_* constant. Null = don't change.
+⋮----
+/// Exposure compensation in AE steps. Null = don't change.
+/// NOTE: has no effect when isoMode == "manual" or exposureMode == "manual"
+/// because CONTROL_AE_MODE is set to OFF in that case.
+⋮----
+/// Enable GPU raw (passthrough) stream. Null = don't change.
+⋮----
+/// Requested height of the GPU raw stream in pixels. Null = don't change. 0 = use default.
+⋮----
+static CamSettings decode(Object result) {
+⋮----
+class CamProcessingParams {
+⋮----
+static CamProcessingParams decode(Object result) {
+⋮----
+class CamCapabilities {
+⋮----
+/// All supported YUV_420_888 stream resolutions, sorted descending by area.
+⋮----
+/// Flutter texture ID for the GPU raw stream (passthrough, no color adjustments).
+/// 0 if raw stream is disabled.
+⋮----
+/// Actual computed width of the GPU raw stream (pixels). 0 if raw stream is disabled.
+⋮----
+/// Requested height of the GPU raw stream (pixels). 0 if raw stream is disabled.
+⋮----
+/// Width of the GPU processed stream texture (pixels). Matches the largest 4:3 YUV size.
+⋮----
+/// Height of the GPU processed stream texture (pixels).
+⋮----
+static CamCapabilities decode(Object result) {
+⋮----
+class CamStateUpdate {
+⋮----
+/// One of: "closed", "opening", "streaming", "recovering", "error"
+⋮----
+static CamStateUpdate decode(Object result) {
+⋮----
+class CamError {
+⋮----
+static CamError decode(Object result) {
+⋮----
+/// Actual sensor values reported by the hardware after each captured frame.
+⋮----
+/// All fields are nullable — null means the hardware did not report that value.
+/// Delivered via [CameraFlutterApi.onFrameResult] at ~3 Hz (every 10th frame).
+class CamFrameResult {
+⋮----
+/// Actual sensor sensitivity (ISO) used for this frame.
+⋮----
+/// Actual exposure duration in nanoseconds used for this frame.
+⋮----
+/// Actual focus distance in diopters (1/metres). 0.0 = infinity.
+⋮----
+/// Red channel gain from COLOR_CORRECTION_GAINS.
+⋮----
+/// Green channel gain (average of greenEven + greenOdd).
+⋮----
+/// Blue channel gain from COLOR_CORRECTION_GAINS.
+⋮----
+static CamFrameResult decode(Object result) {
+⋮----
+/// Mean R, G, B from a sampled image patch. All values in [0.0, 1.0].
+class CamRgbSample {
+⋮----
+static CamRgbSample decode(Object result) {
+⋮----
+class _PigeonCodec extends StandardMessageCodec {
+⋮----
+void writeValue(WriteBuffer buffer, Object? value) {
+⋮----
+Object? readValueOfType(int type, ReadBuffer buffer) {
+⋮----
+class CameraHostApi {
+/// Constructor for [CameraHostApi].  The [binaryMessenger] named argument is
+/// available for dependency injection.  If it is left null, the default
+/// BinaryMessenger will be used which routes to the host platform.
+⋮----
+Future<int> open(String? cameraId, CamSettings? settings) async {
+⋮----
+Future<CamCapabilities> getCapabilities(int handle) async {
+⋮----
+Future<void> updateSettings(int handle, CamSettings settings) async {
+⋮----
+Future<void> setResolution(int handle, int width, int height) async {
+⋮----
+Future<void> setProcessingParams(int handle, CamProcessingParams params) async {
+⋮----
+/// Captures a still JPEG image using Camera2's hardware ISP.
+/// Does NOT include GPU post-processing (LUT, saturation, contrast, brightness, gamma).
+/// Returns the absolute file path of the saved image.
+Future<String> captureNaturalPicture(int handle) async {
+⋮----
+/// Captures the next GPU post-processed frame and saves it to disk.
+/// Format is inferred from [fileName] extension: .jpg/.jpeg → JPEG (quality 90),
+/// .png or absent extension → PNG. [outputDirectory] null = app Pictures directory.
+⋮----
+Future<String> captureImage(int handle, String? outputDirectory, String? fileName) async {
+⋮----
+Future<int?> getNativePipelineHandle(int handle) async {
+⋮----
+Future<String> startRecording(int handle, String? outputDirectory, String? fileName, int? bitrate, int? fps) async {
+⋮----
+Future<String> stopRecording(int handle) async {
+⋮----
+Future<void> close(int handle) async {
+⋮----
+Future<void> pause(int handle) async {
+⋮----
+Future<void> resume(int handle) async {
+⋮----
+/// Returns persisted processing params from a previous session, or null if none exist.
+⋮----
+/// Dart should call this after [open] to initialize slider UI with the user's last-known
+/// values instead of sending default zeros that would overwrite the persisted state.
+Future<CamProcessingParams?> getPersistedProcessingParams(int handle) async {
+⋮----
+/// Returns the current display rotation in degrees CW from portrait: 0, 90, 180, or 270.
+⋮----
+/// Used by Dart preview widgets to select the correct [RotatedBox.quarterTurns]
+/// for all four device orientations, since [MediaQuery.orientation] only
+/// distinguishes portrait from landscape.
+Future<int> getDisplayRotation() async {
+⋮----
+/// Samples the center 16×16 pixel patch of the most recent GPU-processed
+/// RGBA frame and returns the mean R, G, B as values in [0.0, 1.0].
+⋮----
+/// Returns (0.5, 0.5, 0.5) if no frame has been rendered yet.
+Future<CamRgbSample> sampleCenterPatch(int handle) async {
+⋮----
+abstract class CameraFlutterApi {
+⋮----
+void onStateChanged(int handle, CamStateUpdate state);
+⋮----
+void onError(int handle, CamError error);
+⋮----
+void onFrameResult(int handle, CamFrameResult result);
+⋮----
+/// Called when the recording state changes.
+/// [state] is one of: "recording", "idle", "error".
+void onRecordingStateChanged(int handle, String state);
+⋮----
+static void setUp(CameraFlutterApi? api, {BinaryMessenger? binaryMessenger, String messageChannelSuffix = '',}) {
+</file>
+
+<file path="packages/cambrian_camera/lib/src/cambrian_camera_controller.dart">
+import 'dart:async';
+⋮----
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
+import 'package:flutter/widgets.dart';
+⋮----
+import 'calibration.dart'
+    show
+        BbCalibrationResult,
+        RgbSample,
+        WbCalibrationResult,
+        bbError,
+        bbStep,
+        kBbMaxIterations,
+        kBbTolerance,
+        kCalibrationSettleMs,
+        kWbMaxIterations,
+        kWbTolerance,
+        wbError,
+        wbStep;
+import 'camera_settings.dart';
+import 'camera_settings_serializer.dart';
+import 'camera_state.dart';
+import 'frame_result.dart' show FrameResult;
+import 'messages.g.dart';
+⋮----
+/// The main entry point for the Cambrian camera library.
+///
+/// Usage:
+/// ```dart
+/// final camera = await CambrianCamera.open(
+///   settings: CameraSettings(
+///     iso: AutoValue.auto(),
+///     focus: AutoValue.auto(),
+///     enableRawStream: true,        // Enable dual-stream preview
+///     rawStreamHeight: 720,          // Request 720p height
+///   ),
+/// );
+/// // Listen for state changes
+/// camera.stateStream.listen((state) { ... });
+/// // Get preview textures (streams)
+/// camera.toneMappedTexture.listen((info) { /* render processed stream */ });
+/// camera.rawTexture.listen((info) { /* render raw stream */ });
+/// // Adjust settings — only send what changed, omitted fields are preserved
+/// camera.updateSettings(CameraSettings(iso: AutoValue.manual(400)));
+/// camera.updateSettings(CameraSettings(focus: AutoValue.auto()));
+/// camera.updateSettings(CameraSettings(
+///   whiteBalance: WhiteBalance.manual(gainR: 1.82, gainG: 1.0, gainB: 1.45),
+/// ));
+/// camera.setProcessingParams(ProcessingParams(brightness: 0.2));
+/// // Capture a still image
+/// final path = await camera.captureNaturalPicture();
+/// // Clean up
+/// await camera.close();
+/// ```
+⋮----
+/// The library manages camera lifecycle automatically, including error recovery
+/// with exponential backoff. The [stateStream] emits [CameraState.recovering]
+/// during auto-recovery so the UI can show feedback.
+class CambrianCamera {
+CambrianCamera._({
+⋮----
+// Register in the global instance map so FlutterApi callbacks can be
+// routed to the correct camera by handle.
+⋮----
+// CameraSettings use a latest-value-wins serializer because each update
+// requires a Camera2 setRepeatingRequest round-trip.
+⋮----
+// ---------------------------------------------------------------------------
+// Static state
+⋮----
+/// All live [CambrianCamera] instances, keyed by handle.
+⋮----
+/// Entries are added in [CambrianCamera._] (constructor) and removed in
+/// [close]. [_FlutterApiDispatcher] uses this map to route every Kotlin→Dart
+/// callback to the correct instance by handle. The map must be empty when all
+/// cameras are closed; leaks here prevent stream controllers from being GC'd.
+⋮----
+/// Ensures [_FlutterApiDispatcher] is registered exactly once per isolate.
+⋮----
+/// Pigeon's [CameraFlutterApi.setUp] binds a single handler on the binary
+/// messenger. A new Flutter isolate gets its own messenger, so this flag is
+/// isolate-local — each isolate that creates a camera registers its own
+/// dispatcher automatically on the first [open] or constructor call.
+⋮----
+static void _ensureFlutterApiSetup() {
+⋮----
+// Instance state
+⋮----
+/// Opaque handle identifying this camera in platform channel calls.
+/// Also serves as the Flutter [Texture] widget's texture ID.
+⋮----
+/// Whether the raw (pre-processing) GPU stream was requested via [open].
+⋮----
+// Non-final: set to CameraCapabilities.empty() at construction, then updated
+// with real values from getCapabilities() before open() resolves.
+⋮----
+/// The most recent camera lifecycle state. Used as [StreamBuilder.initialData]
+/// to avoid a race where the streaming event fires before the widget subscribes.
+⋮----
+/// Whether [close] has been called on this camera instance.
+⋮----
+// Factory
+⋮----
+/// Opens the camera and returns once it is ready to stream.
+⋮----
+/// [cameraId] selects a specific device; pass null to use the default camera.
+/// [settings] apply initial ISP settings before streaming starts.
+⋮----
+/// To enable the GPU raw (passthrough) preview stream, set [CameraSettings.enableRawStream]
+/// to true in the settings. The [CameraSettings.rawStreamHeight] field controls the
+/// requested height of the raw stream; 0 uses a default.
+⋮----
+/// Throws [PlatformException] if the camera cannot be opened (e.g. permission
+/// denied). After opening, errors are delivered via [errorStream].
+static Future<CambrianCamera> open({
+⋮----
+// Ensure Flutter→Dart callbacks are wired before we open.
+⋮----
+// Extract raw stream settings, defaulting to false if not specified.
+⋮----
+// The handle returned by the platform is also used as the texture ID.
+⋮----
+// Register the instance immediately after open() so that any state/error
+// callbacks fired during the getCapabilities round-trip are not dropped.
+⋮----
+capabilities: CameraCapabilities.empty(), // replaced below
+⋮----
+// Public API
+⋮----
+/// Emits a [CameraTextureInfo] each time the tone-mapped (color-processed)
+/// stream becomes ready for display.
+⋮----
+/// Emits the current state immediately if already streaming, then continues
+/// with future state changes. This ensures late subscribers don't miss the
+/// streaming transition event.
+⋮----
+Stream<CameraTextureInfo> _toneMappedTextureStream() async* {
+⋮----
+/// Emits a [CameraTextureInfo] each time the raw (unprocessed) stream
+/// becomes ready for display. Only emits if [enableRawStream] was true
+/// when [open] was called.
+⋮----
+Stream<CameraTextureInfo> _rawTextureStream() async* {
+⋮----
+/// Device capabilities (resolution list, ISO/exposure ranges, etc.).
+⋮----
+/// The most recent camera lifecycle state.
+⋮----
+/// Use this as [StreamBuilder.initialData] so the preview widget renders
+/// correctly when it is first built after [open] resolves.
+⋮----
+/// Broadcasts camera lifecycle state changes.
+⋮----
+/// The stream is a broadcast stream; multiple listeners are allowed.
+⋮----
+/// Broadcasts camera errors.
+⋮----
+/// [CameraError.isFatal] == false: informational, library is recovering.
+/// [CameraError.isFatal] == true: requires [close] and possible reopen.
+⋮----
+/// Broadcasts actual sensor values reported by the camera hardware.
+⋮----
+/// Emits approximately 3 times per second (throttled in native code to every
+/// 10th capture result). Use this to display live ISO, exposure time, focus
+/// distance, and white-balance gains in the UI.
+⋮----
+/// Broadcasts recording state changes.
+⋮----
+/// Emits a typed [RecordingState] value derived from the wire string sent by
+/// the platform. Unknown wire values default to [RecordingState.error].
+⋮----
+/// Schedules an ISP-level settings update.
+⋮----
+/// Only include the fields you want to change — `null` fields are ignored
+/// and their previous values are preserved on the Kotlin side. Auto-capable
+/// settings use sealed types: [AutoValue.auto] / [AutoValue.manual] for
+/// ISO, exposure, and focus; [WhiteBalance.auto] / [WhiteBalance.locked] /
+/// [WhiteBalance.manual] for white balance.
+⋮----
+/// Uses latest-value-wins: rapid calls do not pile up stale requests.
+/// The change takes effect on the next Camera2 capture request.
+Future<void> updateSettings(CameraSettings settings) async {
+⋮----
+/// Changes the camera stream resolution and reconfigures the capture session.
+⋮----
+/// [width] and [height] must be one of the sizes in [capabilities.supportedSizes].
+/// The camera will briefly transition through [CameraState.recovering] while the
+/// session is rebuilt, then back to [CameraState.streaming].
+⋮----
+/// Must not be called while recording. Throws [PlatformException] on failure.
+Future<void> setResolution(int width, int height) async {
+⋮----
+// Re-fetch capabilities so streamWidth/streamHeight reflect the new resolution.
+⋮----
+// The Kotlin "streaming" state event fires before setResolution() returns its
+// Pigeon reply, so toneMappedTexture emits with stale capabilities. Re-emit
+// the streaming state now that _capabilities has been updated.
+⋮----
+/// Updates C++ pipeline processing parameters immediately.
+⋮----
+/// The returned [Future] completes when the platform channel round-trip
+/// finishes. Callers may await it to observe channel errors, or ignore it
+/// for fire-and-forget semantics. No queuing is applied; the new parameters
+/// are picked up on the next processed frame.
+Future<void> setProcessingParams(ProcessingParams params) {
+⋮----
+/// Returns processing params persisted from a previous session, or null if none exist.
+⋮----
+/// Call after [open] to initialize slider UI with the user's last-known values
+/// instead of overwriting persisted state with defaults.
+Future<ProcessingParams?> getPersistedProcessingParams() async {
+⋮----
+/// Samples the center 96×96 pixel patch of the most recent GPU-processed frame.
+⋮----
+/// Returns the trimmed-mean R, G, B as [RgbSample] with values in [0.0, 1.0].
+/// The top and bottom 15% of pixel values per channel are discarded before
+/// averaging to suppress hot pixels and specular outliers.
+⋮----
+/// Throws [PlatformException] with code `"patch_not_ready"` if the GPU
+/// pipeline has not yet rendered a frame. Callers must not assume a fallback
+/// value — treat this as a hard error and abort any calibration in progress.
+⋮----
+/// Most callers should use [calibrateWhiteBalance] or [calibrateBlackBalance]
+/// instead of calling this directly.
+Future<RgbSample> sampleCenterPatch() async {
+⋮----
+/// Runs the iterative white balance calibration loop.
+⋮----
+/// Samples the trimmed-mean RGB of a 96×96 pixel patch at the center of the
+/// processed frame. Takes a snapshot before any corrections ([patchBefore]) and
+/// another after convergence ([patchAfter]) — useful for before/after display in
+/// the UI. Between samples, applies proportional R/G/B gain corrections via
+/// [updateSettings] until the patch error falls below [kWbTolerance] or
+/// [kWbMaxIterations] is reached.
+⋮----
+/// The app does not need to call [sampleCenterPatch] directly — this method
+/// owns both patch reads and returns them in [WbCalibrationResult].
+⋮----
+/// [initialGainR], [initialGainG], [initialGainB] seed the first loop
+/// iteration. Pass the current AWB values from [FrameResult] when available;
+/// defaults to 1.0.
+Future<WbCalibrationResult> calibrateWhiteBalance({
+⋮----
+// Snapshot the entry-point settings so they can be restored if the loop
+// throws before reaching the final committed updateSettings call.
+⋮----
+// Always apply final gains — handles the already-neutral case where the
+// loop exits on the first iteration without ever calling updateSettings.
+⋮----
+/// Runs the iterative black balance calibration loop.
+⋮----
+/// the UI. Between samples, accumulates per-channel black-level offsets and applies
+/// them via [setProcessingParams] until the patch error falls below
+/// [kBbTolerance] or [kBbMaxIterations] is reached.
+⋮----
+/// owns both patch reads and returns them in [BbCalibrationResult].
+⋮----
+/// [params] is the current [ProcessingParams]; non-black fields are preserved
+/// across each iteration's [setProcessingParams] call.
+Future<BbCalibrationResult> calibrateBlackBalance({
+⋮----
+// Snapshot the caller-supplied params so the original black offsets can be
+// restored if the loop throws after partial mutations.
+⋮----
+/// Captures a still image using Camera2's hardware ISP and returns its file path.
+⋮----
+/// **Important:** This method bypasses the GPU post-processing pipeline. The resulting
+/// image reflects raw ISP output — no LUT, color transforms (saturation, contrast,
+/// brightness, black-level, gamma) or other adjustments applied by the GPU pipeline
+/// are present. Use this when you need the highest-fidelity hardware-encoded JPEG.
+⋮----
+/// For a post-processed image matching what the user sees on screen, use [captureImage].
+⋮----
+/// Uses a dedicated JPEG ImageReader pre-allocated at session setup time.
+/// Does not interrupt the streaming pipeline.
+Future<String> captureNaturalPicture() => _hostApi.captureNaturalPicture(_handle);
+⋮----
+/// Captures the GPU post-processed frame (what the user sees on screen) and saves to disk.
+⋮----
+/// Reads the next full-resolution RGBA frame from the C++ pipeline after the call
+/// (typically about one frame interval; may wait up to the native timeout),
+/// then encodes and saves it.
+⋮----
+/// **Format** is inferred from [fileName]'s extension:
+/// - `.jpg` / `.jpeg` → JPEG (quality 90)
+/// - `.png` or absent / unrecognised extension → PNG (lossless)
+⋮----
+/// **Default directory** is the app-specific Pictures folder
+/// (`getExternalFilesDir(DIRECTORY_PICTURES)`). No extra storage permissions are
+/// required on Android 13+.
+⋮----
+/// **EXIF metadata** (ISO, exposure time, focal length, aperture, white-balance gains,
+/// orientation, and capture timestamp) is written automatically.
+⋮----
+/// Returns the absolute file path of the saved image.
+Future<String> captureImage({String? outputDirectory, String? fileName}) =>
+⋮----
+/// Returns the current display rotation in degrees CW from portrait: 0, 90, 180, or 270.
+⋮----
+/// This is a device-level query, not a per-camera query. Used by preview widgets
+/// to select the correct [RotatedBox.quarterTurns] for all four device orientations.
+static Future<int> getDisplayRotation() =>
+⋮----
+/// Starts recording to an MP4 file. Returns (contentUri, displayName).
+⋮----
+/// [outputDirectory] is a MediaStore RELATIVE_PATH (e.g. "Movies/MyApp/").
+/// If null, defaults to "Movies/CambrianCamera/".
+/// [bitrate] is in bits per second (default 50 Mbps). [fps] is frame rate (default 30).
+⋮----
+/// Recording state changes are delivered via [recordingStateStream].
+/// Throws [PlatformException] if recording cannot be started.
+Future<(String, String)> startRecording({
+⋮----
+// Split on the first '|' only — the display name may itself contain '|'.
+⋮----
+/// Stops recording and finalizes the MP4. Returns the content URI of the finalized file.
+⋮----
+/// Throws [PlatformException] if no recording is in progress.
+Future<String> stopRecording() async {
+⋮----
+/// Returns the native `IImagePipeline*` pointer as an int64, or null if the
+/// pipeline is not yet initialized.
+⋮----
+/// Application C++ code can use this pointer to register consumer sinks
+/// via the `cambrian_camera_native.h` API.
+Future<int?> getNativePipelineHandle() =>
+⋮----
+/// Pauses the camera: releases Camera2 resources but keeps the instance alive.
+⋮----
+/// Call [resume] to restart streaming with the same configuration.
+/// No-op if the camera is not currently streaming.
+Future<void> pause() async {
+⋮----
+/// Resumes a paused camera. No-op if not in the paused state.
+Future<void> resume() async {
+⋮----
+/// Closes the camera and releases all native resources.
+⋮----
+/// After this call the instance must not be used again.
+/// Safe to call multiple times; subsequent calls are no-ops.
+Future<void> close() async {
+⋮----
+// Set before the try block intentionally: prevents concurrent/reentrant second
+// calls from reaching the native layer even if _hostApi.close() throws.
+⋮----
+// Close streams after removing from instances map to prevent callbacks
+// arriving after the streams are closed.
+⋮----
+// Callbacks invoked by [_FlutterApiDispatcher]
+⋮----
+void _onStateChanged(CamStateUpdate update) {
+⋮----
+void _onError(CamError error) {
+⋮----
+void _onFrameResult(CamFrameResult result) {
+⋮----
+void _onRecordingStateChanged(String state) {
+⋮----
+/// Routes Kotlin→Dart callbacks to the correct [CambrianCamera] instance.
+⋮----
+/// A single [_FlutterApiDispatcher] is registered per isolate (via
+/// [CambrianCamera._ensureFlutterApiSetup]). It looks up the target instance
+/// in [CambrianCamera._instances] by handle and forwards the event. Callbacks
+/// that arrive after [close] (handle already removed) are silently dropped —
+/// this can happen if the platform fires a trailing event during teardown.
+class _FlutterApiDispatcher extends CameraFlutterApi {
+⋮----
+void onStateChanged(int handle, CamStateUpdate state) {
+⋮----
+void onError(int handle, CamError error) {
+⋮----
+void onFrameResult(int handle, CamFrameResult result) {
+⋮----
+void onRecordingStateChanged(int handle, String state) {
+</file>
+
+</files>
