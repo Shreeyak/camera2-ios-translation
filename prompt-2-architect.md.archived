@@ -1,0 +1,297 @@
+# Prompt 2: iOS Translation Architect
+
+Run this prompt SECOND, after reviewing the Cartographer's output in `output/`.
+It reads the documentation and produces the iOS app design + phased implementation plan.
+The output goes to the `design/` directory.
+
+## Pre-requisites
+
+- Prompt 1 (Cartographer) has been run and output verified
+- The `output/` directory contains all expected files (check output/MANIFEST.md)
+
+## The Prompt
+
+```
+You are a senior iOS architect specializing in camera pipelines, Metal GPU programming, and Swift concurrency. Design a native iOS/Swift app that replicates the functionality documented in the audit files.
+
+<objective>
+Read the audit documentation in output/ and design a native iOS app (iOS 26+, Metal 4, SwiftUI) with a phased implementation plan. Each phase must produce something testable. Preserve behavioral contracts and edge cases from the Android codebase. Address iOS-specific concerns the audit cannot anticipate.
+
+Two core missions:
+1. FRAME DELIVERY PIPELINE — Camera → Metal GPU processing → fan-out to C++ consumers (OpenCV) for ML/CV
+2. CAMERA CHARACTERISTIC CONTROL SURFACE — Full manual control of focus, AWB, AE, ISO, exposure, zoom
+
+Work only from the audit documentation. Do not read Android source code.
+</objective>
+
+<context>
+Start with output/06-architecture-brief.md (entry point), then output/02-api-contract.md, then maps and cards as needed. See output/MANIFEST.md for the full file index.
+
+The audit may have gaps. Make provisional choices with stated assumptions, flag in design/07-open-questions.md. Don't block the design on missing data.
+</context>
+
+<reference-architecture>
+ARCHITECTURE — "Sandwich" pattern:
+- TOP: SwiftUI (@Observable ViewModel, never touches buffers)
+- MIDDLE: UIViewRepresentable + MTKView (bridge)
+- BOTTOM: CameraEngine (Swift actor or class) + C++ interop
+
+HARD REQUIREMENTS:
+1. Zero-copy: CVMetalTextureCacheCreateTextureFromImage for CVPixelBuffer → MTLTexture. Create cache ONCE, reuse per-frame.
+2. Memory retention: CVBufferRetain before async C++ handoff, CVBufferRelease after. Without this, camera recycles buffer mid-processing.
+3. Back-pressure: AsyncStream with .bufferingNewest(1). Drops old frames automatically, keeps memory flat.
+4. Preview: Draw Metal output to MTKView, not AVCaptureVideoPreviewLayer (which shows raw feed). Phase 1a may use preview layer temporarily.
+
+CONCURRENCY (Swift 6 compile-time isolation):
+| Component | Isolation | Why |
+| UI | @MainActor | Receive only simple view states |
+| Camera | Serial DispatchQueue | AVFoundation requirement. Hand off to actors immediately. |
+| ML/CV | @globalActor (@MLProcessor) | Compiler prevents cross-boundary calls |
+| Metal Renderer | nonisolated methods | System calls draw() on its own schedule |
+
+SENDABLE: Keep buffers on one queue. Only Sendable result structs cross actor boundaries. CVPixelBuffer → raw pointer → cv::Mat → OpenCV processing → all on one queue. If buffers must cross boundaries, Swift 6's `sending` annotation (SE-0430) is cleaner than @unchecked Sendable.
+
+C++ INTEROP: Prefer direct Swift-C++ interop (Swift 5.9+). Fall back to ObjC++ only for unsupported C++ features. The C++ layer uses OpenCV (portable). Zero-copy: CVPixelBufferGetBaseAddress → cv::Mat wrapping pointer.
+
+AVAILABLE FRAMEWORKS (iOS 26+):
+- Metal 4: ML+graphics integration, improved command encoding
+- MetalFX: Temporal upscaling, denoising
+- VTFrameProcessor (VideoToolbox): Frame processing with configurable effects, Metal command buffer variant, returns AsyncSequence. Evaluate for standard transforms (color conversion, resize) before writing custom shaders.
+- Swift-C++ interop: Direct header import via Clang modules
+</reference-architecture>
+
+<constraints>
+- iOS 26+, Swift 6, Metal 4. No backward-compatibility shims.
+- Evaluate VTFrameProcessor for standard transforms before custom Metal shaders.
+- SwiftUI primary, UIKit only for MTKView/AVCaptureVideoPreviewLayer.
+- Prefer direct Swift-C++ interop. Assess OpenCV header compatibility with Clang modules.
+- Swift 6 actor isolation. @MainActor for UI, @globalActor for ML, serial queue for camera.
+- Error handling and camera controls from Phase 1, not bolted on later.
+- Zero-copy throughout. Frame dropping via AsyncStream, not queuing.
+</constraints>
+
+<deliverables>
+
+DELIVERABLE 0 — GAP ANALYSIS
+
+Write design/00-gap-analysis.md FIRST, before designing anything:
+| Gap/Risk | Audit file | What's missing or wrong | Impact on design | Provisional choice? |
+- Missing information, architectural risks, ambiguities, contradictions
+- Make provisional choices where possible, flag blocking gaps
+
+DELIVERABLE 1 — CONCURRENCY, STATE, AND ERROR DESIGN
+
+Write design/01-concurrency-and-state.md:
+
+### Concurrency Architecture
+| Android construct (from audit) | Swift equivalent | Why this choice |
+- Map every L2 threading invariant to a compile-time enforcement mechanism
+- AsyncStream .bufferingNewest(1) for frame delivery
+- Sendable strategy: buffers on one queue, results cross boundaries
+- Justify every isolation boundary
+
+### State Machine
+- Replicate Android state machine using Swift enum + actor
+- Add iOS-specific states: WAITING_FOR_PERMISSION
+- How state changes propagate to SwiftUI
+- Port every L4 edge-case guard with iOS equivalent
+
+### Error & Recovery
+- iOS stall watchdog equivalent
+- AVCaptureSession failure modes and recovery
+- Port every L4 error guard
+
+### iOS-Specific Failure Modes
+Design handling for (these have NO Android equivalent):
+- ProcessInfo.ThermalState (degrade resolution/frame rate)
+- AVCaptureDevice.SystemPressureState (reduce capture quality)
+- Multi-app camera conflicts
+- AVCaptureSession runtime errors
+- Permission denial/revocation mid-session
+
+### Permissions
+- NSCameraUsageDescription, PHPhotoLibrary authorization
+- Integrated with state machine, graceful denial handling
+
+DELIVERABLE 2 — METAL PIPELINE DESIGN
+
+Write design/02-metal-pipeline.md:
+
+### Pipeline Architecture
+- Evaluate VTFrameProcessor for each processing step first
+- Document which transforms it handles vs which need custom shaders
+- Custom shaders: compute vs fragment vs MPS, with justification
+- Pipeline topology (Mermaid)
+
+### Texture Specification
+| Stage | MTLPixelFormat | Dimensions | Usage flags | Storage mode |
+
+### Color Space / HDR
+- SDR or HDR? Recommendation with justification.
+- Texture format implications (BGRA8Unorm vs RGBA16Float)
+
+### Zero-Copy Path
+- CVPixelBuffer → MTLTexture → MTKView
+- CVPixelBuffer → cv::Mat → OpenCV (CPU path)
+- Fan-out: how processed frames reach preview AND C++ consumers
+
+### Shader Translation
+- Each GLSL shader → Metal Shading Language equivalent
+- Formats, constant buffers, thread group sizing
+
+### Profiling Strategy
+- os_signpost intervals for each pipeline stage
+- Frame budget breakdown (e.g., 33ms at 30fps: capture <2ms, compute <8ms, display <4ms)
+- Thresholds: acceptable vs degraded vs failing
+- Instruments templates: Metal System Trace, Allocations, Time Profiler
+
+DELIVERABLE 3 — INTEGRATION AND CONTROLS DESIGN
+
+Write design/03-integration-and-controls.md:
+
+### C++ / OpenCV Integration
+- Assess Swift-C++ interop compatibility for OpenCV headers
+- If compatible: direct Swift → C++ calls. If not: thin ObjC++ bridge.
+- OpenCV iOS setup (CocoaPods, SPM, or xcframework)
+- Zero-copy handoff: CVPixelBufferLockBaseAddress → GetBaseAddress → cv::Mat → process → unlock
+- C++ portability (from audit's cpp-sinks card)
+
+### Results Return Path
+Trace this concrete scenario through the entire stack:
+"OpenCV detects an object at (x=0.3, y=0.5, w=0.2, h=0.15), confidence 0.87, label 'cell'."
+Show: C++ type → Swift Sendable struct → thread transitions → SwiftUI overlay.
+Design os_signpost intervals so Instruments shows where inference latency ends and UI latency begins.
+
+### Camera Device Discovery
+- AVCaptureDevice.DiscoverySession
+- Front/back/wide/ultra-wide selection
+- Device switching and session reconfiguration
+- Capability querying per device
+
+### Camera Controls
+| Characteristic | Android API (audit) | iOS API (AVCaptureDevice) | Differences | Constraints |
+- lockForConfiguration/unlockForConfiguration pattern
+- Supported range querying
+- Control conflicts (manual exposure → AE off)
+
+### What NOT to Port
+Items from the audit that are Android-only and should be omitted:
+| Item | Why it's Android-only | Safe to omit? |
+
+DELIVERABLE 4 — PHASED IMPLEMENTATION PLAN
+
+Write design/04-implementation-phases.md:
+
+Six phases. Each produces a testable app. Each MUST include a file tree with each file's responsibility and which design doc section it implements.
+
+### Phase 1a — Camera Capture + State Machine + Lifecycle
+- SwiftUI scaffold with actor-based concurrency from day one
+- Permission flow, AVCaptureSession setup, device discovery
+- Raw preview (AVCaptureVideoPreviewLayer — temporary)
+- Full state machine including WAITING_FOR_PERMISSION
+- Error detection: interruption handler, system pressure monitoring
+- Background/foreground lifecycle, basic thermal monitoring
+
+Acceptance: permission handling, preview works, camera switching, state machine logs match design, interruption recovery.
+
+File tree: [REQUIRED]
+
+### Phase 1b — Camera Controls
+- All controls wired to AVCaptureDevice APIs
+- UI for each control
+- Capability querying, control interactions
+
+Acceptance: every control adjusts real parameter, ranges correct per device, conflicts handled.
+
+File tree: [REQUIRED]
+
+### Phase 2 — Metal Processing Pipeline
+- Replace preview layer with Metal render path
+- CVPixelBuffer → MTLTexture via cache (zero-copy)
+- Metal compute shaders / VTFrameProcessor for transforms
+- MTKView display, processing configuration API
+- os_signpost instrumentation
+
+Acceptance: processed preview, correct transforms, stable frame rate, signpost timing breakdown.
+
+File tree: [REQUIRED — include .metal files]
+
+### Phase 3 — C++ / OpenCV Integration + Fan-Out
+- C++ integration (direct Swift or ObjC++ bridge)
+- OpenCV framework setup
+- Zero-copy handoff: CVPixelBuffer → cv::Mat
+- Fan-out: preview + ML sink + CV sink simultaneously
+- AsyncStream back-pressure, results return to SwiftUI
+- os_signpost on return path
+
+Acceptance: C++ consumer receives frames, memory stable, slow consumer drops frames, results in SwiftUI overlay.
+
+File tree: [REQUIRED]
+
+### Phase 4 — Performance + Resilience
+- Frame pacing (triple-buffering/ring buffer)
+- GPU readback optimization
+- Profiling with Instruments
+- Thermal throttling response, system pressure response
+- Performance thresholds enforced
+
+Acceptance: measured latency, no frame drops, graceful thermal degradation.
+
+File tree: [REQUIRED]
+
+### Phase 5 — Capture + Recording
+- Still capture (AVCapturePhotoOutput, EXIF)
+- Photo library permission
+- Video recording (AVAssetWriter, audio sync)
+- All recording edge-case guards from audit
+- Mid-recording error handling, background teardown
+
+Acceptance: EXIF correct, recording clean start/stop, audio synced, background-safe.
+
+File tree: [REQUIRED]
+
+### Phase 6 — Parity + Polish
+- Feature parity audit against output/02-api-contract.md
+- UI refinement to match Android screenshots
+- Remaining edge cases verified
+- Final performance pass
+
+Acceptance: every API method mapped or documented as N/A, UI matches, edge cases verified.
+
+DELIVERABLE 5 — DESIGN DECISIONS LOG
+
+Write design/05-decisions-log.md:
+| # | Decision | Alternatives | Chosen because | Audit reference | Reversibility |
+
+DELIVERABLE 6 — RISK REGISTER
+
+Write design/06-risks.md:
+| Risk | Phase | Likelihood | Impact | Mitigation | Audit L4 ref |
+
+DELIVERABLE 7 — OPEN QUESTIONS
+
+Write design/07-open-questions.md:
+- Audit gaps with provisional choices and stated assumptions
+- Architecture choices with no clear winner
+- iOS-specific concerns not in the audit
+- Performance targets needing definition
+</deliverables>
+
+<tool-usage>
+Read: files in output/ and design/
+Write: files in design/ only
+Do not read Android source code — work from audit documentation.
+</tool-usage>
+
+<quality-gates>
+- Every L2 invariant from audit has an iOS enforcement mechanism
+- Every L4 guard has an iOS equivalent or explicit justification for omission
+- Every API contract method is mapped or documented as N/A
+- Each phase has a concrete file tree and testable acceptance criteria
+- VTFrameProcessor evaluated before custom shaders proposed
+- Buffers confined to one queue; only Sendable results cross boundaries
+- Profiling strategy has os_signpost intervals and frame budget thresholds
+- iOS-specific failure modes designed for
+- Decisions log captures significant choices with alternatives
+</quality-gates>
+```

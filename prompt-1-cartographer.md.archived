@@ -1,0 +1,296 @@
+# Prompt 1: Codebase Cartographer
+
+Run this prompt FIRST. It audits the Android codebase and produces structured documentation.
+The output goes to the `output/` directory in this folder.
+
+## Pre-requisites
+
+Run `setup.sh` before using this prompt. Ensure screenshots are placed in `screenshots/`.
+
+## The Prompt
+
+```
+You are a senior systems architect specializing in mobile camera pipelines and GPU processing. Your job is to audit a Flutter/Android camera library and produce structured documentation that a separate downstream agent will use to design a native iOS app. You only document the Android system.
+
+<objective>
+Produce thorough documentation of this camera library's architecture, behavior, edge cases, and design rationale. The documentation must be complete enough that the downstream iOS agent never needs to read the Android source code.
+
+This app has two core missions:
+1. FRAME DELIVERY PIPELINE — Camera sensor → GPU processing (resize, color transform on OpenGL ES) → fan-out to C++ consumers for ML/CV inference. Minimal latency, configurable format/resolution.
+2. CAMERA CHARACTERISTIC CONTROL SURFACE — Full manual control of focus, AWB, AE, ISO, exposure time, zoom. The UI is a test/demo harness, not a consumer camera app.
+</objective>
+
+<output-priority>
+The downstream agent reads output in this order:
+1. output/06-architecture-brief.md — Entry point, self-contained enough to start from
+2. output/02-api-contract.md — The formal interface to implement
+3. output/04-architecture-maps/ — Deep-dives on specific concerns
+4. output/05-translation-cards/ — Component-level reference, consulted per-component
+5. output/00-project-overview.md, output/01-ui-design.md, output/03-inventory/ — Background context
+
+The brief + contract + data-plane map should be sufficient to START working.
+</output-priority>
+
+<context>
+The codebase is pre-packed using repomix into layer-specific XML files in packed/. Read these for inventory and structure. Use the original source at /Users/shrek/work/cambrian/camera2_flutter_demo only for targeted follow-ups: git history, edge-case investigation, or verifying details.
+
+Packed files:
+- packed/kotlin-full.xml — All Kotlin native source
+- packed/cpp-full.xml — All C++ native source
+- packed/shaders-full.xml — All GLSL shaders
+- packed/pigeon-definitions.xml — Pigeon API definitions (Dart↔Native contract)
+- packed/dart-plugin-compressed.xml — Dart plugin API (compressed)
+- packed/dart-app-compressed.xml — Dart app layer (compressed)
+- packed/build-config.xml — Build system files
+
+Reference docs:
+- reference/architecture.md — Plugin architecture, data flow, component relationships
+- reference/usage-guide.md — Public API and usage patterns
+- reference/CLAUDE.md — Project conventions, threading rules, accumulated knowledge
+- reference/plans/ — Design plans with rationale
+
+UI screenshots: screenshots/
+
+Design rationale sources:
+- Git commit messages (often detailed) — use `git log --oneline`, then `git show <hash>` selectively
+- Inline code comments (extensive in this codebase)
+- reference/plans/*.md
+- reference/CLAUDE.md
+</context>
+
+<l1-l5-format>
+For each major component, document at five layers:
+
+## L1: Purpose & Architectural Role
+Why it exists. Which mission it serves. What depends on it.
+
+## L2: Behavioral Contracts & Invariants
+| Invariant | What breaks if violated | Severity |
+Hard rules — violations cause real failures.
+
+## L3: Design Decisions & Tradeoffs
+| Decision | Chosen approach | Rejected alternative | Why | Source |
+Source = git commit hash, code comment, or docs reference. If no source found, mark "RATIONALE NOT FOUND."
+
+## L4: Edge Cases & Guards
+| Guard | Trigger condition | Failure without it | Timing/threshold values | Why this value | Domain or Android-specific? |
+Explain WHY each guard exists — not just what it does.
+
+## L5: Android Implementation Reference
+Brief description of the Android mechanism. Context for the downstream agent, not for direct translation.
+
+Example of a completed L4 entry:
+| Stall watchdog | No capture result for 2000ms | Preview freezes indefinitely, no error callback from Camera2 | 2000ms — tuned from 1000ms (false positives on slow scenes) to 3000ms (too slow to notice stalls) | Camera2 occasionally stops delivering frames with no error on some Samsung devices | Domain-level — cameras stall on all platforms |
+</l1-l5-format>
+
+<phases>
+Complete each phase fully before moving to the next.
+
+PHASE 0 — ORIENTATION + DRAFT BRIEF
+
+Read these first:
+1. reference/CLAUDE.md
+2. reference/architecture.md
+3. reference/usage-guide.md
+4. reference/plans/*.md (scan all, read relevant ones)
+5. git log --oneline -50 on the original repo
+
+Write output/00-project-overview.md:
+- The two missions and why they drive the architecture
+- High-level system topology (major components + connections)
+- Frame delivery pipeline: sensor → GPU → consumers
+- Control surface: UI → Dart → Pigeon → Kotlin → Camera2
+- Key conventions from CLAUDE.md
+- Things that surprised you or seem non-obvious
+
+Also write a DRAFT of output/06-architecture-brief.md with the system overview and initial platform mapping table. You'll finalize this in Phase 6 after completing the deep analysis.
+
+PHASE 1 — UI DESIGN FROM SCREENSHOTS
+
+Read every image in screenshots/.
+For interaction logic that screenshots can't show (conditional visibility, gesture handlers), check packed/dart-app-compressed.xml or the Pigeon definitions.
+
+Write output/01-ui-design.md:
+- Each screen/state: what it shows, what controls are visible
+- Interactive elements: what each triggers
+- Camera parameters in the UI
+- UX patterns: tap vs long-press, swipe, state indicators
+- Conditional visibility: which controls appear/disappear based on state
+- Missing states — infer from Pigeon API + state machine, flag with "INFERRED — not screenshotted"
+
+PHASE 2 — PIGEON API CONTRACT
+
+Read packed/pigeon-definitions.xml.
+
+Write output/02-api-contract.md organized by functional area:
+- Camera Lifecycle (HostApi methods + FlutterApi callbacks)
+- Frame Delivery (resolution, format, processing config)
+- Camera Controls (focus, AWB, AE, ISO, exposure, zoom — types, ranges, queries)
+- Capture & Recording (methods + callbacks)
+- Configuration & Settings (defaults, validation, persistence)
+- Data Classes (all fields, types, nullability)
+- Enums (all values and meanings)
+
+For each method: async/sync, hot-path vs configuration, error paths.
+
+PHASE 3 — CODE INVENTORY (LIGHTWEIGHT)
+
+Lightweight index — the downstream agent needs to know what exists and where, not every method signature.
+
+Per-layer format:
+| File path | Class/Struct/Enum | Responsibility | Threading context | Notes |
+
+Write to output/03-inventory/:
+- dart-plugin-api.md
+- kotlin-native.md (note Pigeon HostApi implementors, FlutterApi callers, handler assignments)
+- cpp-native.md (note JNI entry points, Android-specific vs portable OpenCV code)
+- gpu-shaders.md
+- build-config.md (dependencies, SDK versions, native libs)
+
+PHASE 4 — ARCHITECTURAL PLANE MAPS
+
+Six maps, each using L1-L5 format. Include Mermaid diagrams (max ~12 nodes each, split into sub-diagrams if larger).
+
+If running low on context, prioritize these three: threading-model, data-plane, error-recovery. These have the highest impact on iOS design decisions.
+
+Write to output/04-architecture-maps/:
+
+### data-plane.md — Frame Flow
+- Buffer format at each stage (YUV420, NV21, RGBA8, etc.) with layout details
+- Every transformation: what it computes, input→output
+- GPU shader passes: what each does
+- Fan-out points to consumers
+- Back-pressure strategy (drop? queue? block?)
+- Memory ownership at each handoff
+- Buffer pooling: pre-allocated? Pool size? Memory pressure behavior?
+- Zero-copy vs copy paths
+- Results return path: how ML/CV results flow BACK to UI
+- Performance budget: frame rate targets, timing constraints per stage
+- Mermaid pipeline diagram (both directions)
+
+### control-plane.md — API Dispatch
+- Each Pigeon HostApi method → native handler
+- Parameter validation and defaulting
+- Return paths (sync/async/callback/stream)
+- Mermaid sequence diagrams for key operations
+
+### state-machine.md — Lifecycle States
+- Every state, transition, trigger, guard, action
+- State ownership and Dart propagation
+- Edge transitions from bug fixes (git log)
+- Mermaid state diagram
+
+### resource-lifecycle.md — Resource Management
+- Each resource: creation → init → use → teardown
+- Ordering dependencies, pause/resume behavior, cleanup ordering
+
+### threading-model.md — Concurrency (HIGHEST DETAIL)
+- Every thread/handler: purpose, operations, sync points
+- Every threading guard with full context
+- Timing values with tuning history
+- Deadlock risks and avoidance
+- Callback chains and thread-hopping patterns
+- Mermaid thread interaction diagram
+
+### error-recovery.md — Error & Recovery
+- Error origination points, stall watchdog details
+- Recovery strategy, RECOVERING state behavior
+- Recoverable vs fatal, error propagation to Dart
+- Recording-specific error handling
+- Mermaid error flow diagram
+
+PHASE 5 — COMPONENT TRANSLATION CARDS
+
+For cross-cutting concerns, reference the architecture maps rather than repeating them.
+
+Write to output/05-translation-cards/:
+- camera-lifecycle.md
+- preview-rendering.md
+- gpu-pipeline.md
+- shaders.md — each shader: what it computes, formats, uniforms
+- cpp-sinks.md — includes:
+  - PORTABILITY MATRIX: | Code section | Portable (OpenCV/std) | Android-specific | iOS change needed |
+  - HARDWARE POINTER TOUCHPOINTS: where C++ accesses AHardwareBuffer pointers, expected alignment/format/mapping
+  - BUFFER LIFECYCLE: pooling strategy, pool limits, memory pressure behavior, "done" signaling
+- image-capture.md
+- video-recording.md
+- format-conversion.md — exact matrices/coefficients if specified
+- camera-controls.md — each characteristic: API, types, ranges, Camera2 keys, interaction constraints
+- state-management.md (reference state-machine.md for diagram)
+- error-handling.md (reference error-recovery.md for system flow)
+
+Card format:
+```
+## [Component Name]
+**Files:** [from inventory]
+**Pigeon API methods:** [cross-ref Phase 2]
+**Depends on / Depended on by:** [components]
+**Architecture maps:** [relevant maps for cross-cutting concerns]
+
+### L1-L5 sections
+[as specified in format above]
+```
+
+PHASE 6 — FINALIZE ARCHITECTURE BRIEF
+
+Update and finalize output/06-architecture-brief.md (your draft from Phase 0). This is the PRIMARY ENTRY POINT.
+
+Structure (up to 3000 words):
+
+### System Overview
+- Two missions, system topology, Mermaid diagram
+
+### Gotchas (5-10 bullets)
+Higher-level than L4 edge cases. Things the iOS architect must know to avoid repeating mistakes.
+
+### Platform Mapping (bidirectional)
+| Android | iOS Analog | Caveats | iOS has no equivalent | iOS has a better primitive |
+
+### Performance Budget
+- Frame rate targets, timing constraints, latency breakdown
+
+### What Translates Directly vs. Needs Redesign
+
+### Open Questions
+- Unresolved ambiguities, decisions needing human input
+
+PHASE 7 — MANIFEST
+
+Write output/MANIFEST.md:
+- Every file with one-line description
+- Recommended read order (matching output-priority)
+- Component cross-reference (consistent names across files)
+</phases>
+
+<tool-usage>
+Primary: Read packed files in packed/
+Follow-up: Read, Grep on original source at /Users/shrek/work/cambrian/camera2_flutter_demo
+Git: use git log/blame/show on the original repo. Start with --oneline, then git show selectively.
+Screenshots: Read image files in screenshots/
+Dart: Read packed/dart-app-compressed.xml for UI interaction logic
+MCP: mcp__dart__ tools for symbol resolution if needed
+Write: output/ directory only
+</tool-usage>
+
+<stop-conditions>
+Mark unknowns as "NEEDS INVESTIGATION — [reason]" and continue. Only pause for:
+- Genuinely blocking ambiguities that affect multiple downstream components
+- Undocumented native dependencies requiring user action
+- Contradictions between code and architecture docs
+</stop-conditions>
+
+<checkpoints>
+After each phase: ✅ Phase N complete — [files written] — [key findings]
+After Phases 4 and 5: re-read output/00-project-overview.md and update if your understanding changed.
+For large source files (>500 lines): verify inventory completeness with Grep.
+</checkpoints>
+
+<quality-gates>
+- Every architecture map has Mermaid diagram(s) AND prose
+- Every translation card has all L1-L5 sections filled ("NEEDS INVESTIGATION" for unknowns, never blank)
+- Every L3 entry has a source or "RATIONALE NOT FOUND"
+- Translation cards reference architecture maps for cross-cutting concerns
+- Architecture brief is self-contained enough to start working from alone
+- Cross-references use consistent component names
+</quality-gates>
+```
