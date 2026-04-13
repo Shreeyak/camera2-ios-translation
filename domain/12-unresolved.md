@@ -8,87 +8,31 @@ Items are numbered for cross-reference. Downstream architect should resolve each
 
 ---
 
-## U-01: Camera Permission Flow and Denial Recovery
-
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
-
-The audit documents a `PERMISSION_DENIED` error code and that the system receives a `SecurityException` on some devices after keyguard dismiss (treated non-fatally). However, permission flows — how and when the system requests camera access, how it detects denial, and how it recovers — are entirely platform-specific.
-
-**For downstream architect:** Define the permission request lifecycle for the target platform. Determine whether the equivalent of the keyguard-dismiss bug exists on the target platform, and if so, what its observable form is. Determine whether permission can be revoked mid-session and how the system should respond.
-
-[audit: 08-error-recovery.md, 04-pigeon-api.md §CamErrorCode]
+## U-01: [Camera Permission Flow and Denial Recovery] → RESOLVED in design/ — see design/02-concurrency.md §iOS-Specific Concurrency States (Permission State) and design/07-ios-specific-risks.md R-03, R-04
 
 ---
 
-## U-02: GPU API and Frame Delivery Mechanism
-
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
-
-The audit describes a GPU pipeline that receives camera frames via a hardware texture binding (the camera delivers directly to a GPU texture), renders to multiple output targets (preview, encoder, natural, tracker), and reads back processed frames via an asynchronous double-buffered readback mechanism. The specific GPU API is OpenGL ES.
-
-**For downstream architect:** The target platform likely has a different GPU API (Metal on Apple platforms, Vulkan on some others). The behavioral requirements — asynchronous readback, multiple render targets, zero-copy camera-to-GPU delivery — are specified in `02-frame-delivery.md`. Determine the GPU API surface available on the target platform and how camera frames are delivered to the GPU. Specifically: can camera frames be delivered directly to a GPU texture without CPU involvement?
-
-[audit: 03-capture-pipeline.md, 05-gpu-opengl.md]
+## U-02: [GPU API and Frame Delivery Mechanism] → RESOLVED in design/ — see design/03-metal-pipeline.md §Zero-Copy Bridge (CVMetalTextureCache, CVPixelBuffer → MTLTexture without CPU copy) and §Texture Specification (R8Unorm Y plane, RG8Unorm CbCr plane, double-buffered MTLBuffer readback)
 
 ---
 
-## U-03: Encoder Surface / GPU-to-Encoder Zero-Copy
-
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
-
-The audit describes a mechanism where the GPU renders directly to the video encoder's input surface via GPU buffer presentation — no CPU YUV copy. This is specific to the Android GPU-to-encoder integration path and is not universally available on all platforms.
-
-**For downstream architect:** Determine whether the target platform supports GPU-to-encoder zero-copy. If not, a CPU blit path will be needed. This has significant performance implications for recording frame rates. This is a key architectural decision for `08-capture-and-recording.md`.
-
-[audit: 10-capture-recording.md §Video Recording, 03-capture-pipeline.md §GpuPipeline Frame Sequence]
+## U-03: [Encoder Surface / GPU-to-Encoder Zero-Copy] → RESOLVED in design/ — see design/03-metal-pipeline.md §GPU-to-Encoder Path (IOSurface-backed CVPixelBufferPool with kCVPixelBufferMetalCompatibilityKey; MTLBlitCommandEncoder GPU-local blit; VideoToolbox maps same IOSurface — no CPU copy) and design/06-decisions-log.md D-03
 
 ---
 
-## U-04: Preview Texture Integration with UI Framework
-
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
-
-The audit describes a "Flutter Texture registry" system where the GPU renders to a platform-provided surface that is mapped to a UI texture ID. The UI layer renders this texture ID in a widget without any CPU frame transfer.
-
-**For downstream architect:** The target platform and UI framework will have a different mechanism for displaying GPU-rendered content in a UI component. Determine the equivalent of the Flutter Texture registry on the target platform. This affects how `02-frame-delivery.md` §Preview Surface Delivery is implemented.
-
-[audit: 03-capture-pipeline.md §GpuPipeline, 04-pigeon-api.md §CamCapabilities]
+## U-04: [Preview Texture Integration with UI Framework] → RESOLVED in design/ — see design/01-architecture.md §Layer 2 (MTKView via UIViewRepresentable; two instances: MetalViewWrapper for processed stream, NaturalMetalViewWrapper for natural stream; OSAllocatedUnfairLock protects shared texture slot; no CPU pixel transfer) and design/06-decisions-log.md D-07
 
 ---
 
-## U-05: Thermal Throttling and System Pressure
-
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
-
-The audit does not describe any thermal throttling or system pressure handling. The FPS degradation notification (`FPS_DEGRADED` below 15fps for 3 consecutive samples) is a proxy for detecting hardware-induced frame rate drops, but the root cause is not addressed.
-
-**For downstream architect:** The target platform may have explicit thermal/system-pressure APIs. Determine whether the system should observe these APIs and respond proactively (e.g., reduce resolution or frame rate before FPS degrades). The `FPS_DEGRADED` notification semantics are specified in `06-error-and-recovery.md`.
-
-[audit: 08-error-recovery.md §FPS Degradation]
+## U-05: [Thermal Throttling and System Pressure] → RESOLVED in design/ — see design/02-concurrency.md §Thermal State Integration (ProcessInfo.thermalStateDidChangeNotification: nominal/fair = restore, serious = 15fps cap, critical = full suspend) and design/07-ios-specific-risks.md R-01, R-02 (AVCaptureDevice.systemPressureState KVO)
 
 ---
 
-## U-06: Actor Isolation and Concurrency Model
-
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
-
-The audit describes a thread-based concurrency model with explicit locks and a documented lock ordering. The domain requirements (`04-concurrency-invariants.md`) describe the invariants behaviorally, but the implementation mechanism is unspecified.
-
-**For downstream architect:** The target platform may support structured concurrency models (Swift actors, async/await, etc.) that provide stronger isolation guarantees than explicit locking. Determine whether the lock ordering documented in `04-concurrency-invariants.md` can be enforced structurally (via actor isolation) or requires explicit locks on the target platform.
-
-[audit: 02-threading-model.md §Lock Ordering]
+## U-06: [Actor Isolation and Concurrency Model] → RESOLVED in design/ — see design/02-concurrency.md §Domain Invariant Mapping (all 11 invariants mapped to named Swift mechanisms: CameraEngine actor for session/state serialization, @MainActor for UI, OSAllocatedUnfairLock for nonisolated renderer texture slot, AsyncStream for back-pressure) and design/06-decisions-log.md D-01
 
 ---
 
-## U-07: Background Suspension Definition
-
-**Type:** UNCLEAR
-
-The audit states that the system releases the camera when the app transitions to "fully invisible" (as opposed to partially occluded). The distinction matters for determining when to call `backgroundSuspend()` vs. doing nothing.
-
-**For downstream architect:** The target platform's app lifecycle events may not have a clean "fully invisible" signal equivalent to Android's `onStop`. Clarify how "fully invisible" maps to the target platform's lifecycle. The behavioral requirement is in `05-resource-lifecycle.md`.
-
-[audit: 07-state-machine.md §Background Suspend/Resume, 12-git-archaeology.md]
+## U-07: [Background Suspension Definition] → RESOLVED in design/ — see design/02-concurrency.md §App Lifecycle (scenePhase == .background is the trigger; .inactive explicitly does NOT trigger suspend — validated against Control Center and notification banner overlays) and design/06-decisions-log.md D-08
 
 ---
 
@@ -108,37 +52,29 @@ The audit describes resolution discovery via a camera stream configuration map. 
 
 ## U-09: EXIF Metadata on Target Platform
 
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
+**Type:** PARTIALLY RESOLVED
 
-The audit describes writing EXIF metadata to still images after encoding, including standard tags (ISO, exposure, focus, white balance) and non-standard fields serialized as JSON in `TAG_USER_COMMENT`.
+**Settled:** The iOS EXIF writing API is `CGImageDestination` with `CGImageDestinationAddImageFromSource`. Standard sensor tags (ISO, exposure, focus, white balance) are written via `kCGImagePropertyExifDictionary`. Non-standard fields are serialized as a JSON string under `kCGImagePropertyExifUserComment` using the key `"CamPlugin/v1"` — preserving interoperability with any tool consuming the Android format. Implementation lives in `EXIFWriter.swift` (Phase 5).
 
-**For downstream architect:** Determine the target platform's EXIF writing APIs. The behavioral requirement — that EXIF is written with sensor metadata — is in `08-capture-and-recording.md`. The specific JSON structure in `TAG_USER_COMMENT` should be preserved for interoperability if the images are consumed by other tools expecting this format.
+**Still open:** The specific JSON field names and schema for the `"CamPlugin/v1"` user comment object are not yet specified. This must be defined during Phase 5 implementation by comparing the exact fields written by the Android source and confirming which subset is meaningful on iOS.
 
-[audit: 10-capture-recording.md §EXIF Orientation, §Still Capture: captureImage]
+[design: design/05-implementation-phases.md §Phase 5, design/07-ios-specific-risks.md R-17]
 
 ---
 
-## U-10: Camera Orientation and Sensor Mounting Angle
-
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
-
-The audit describes a 90° clockwise UV rotation applied to normalize the camera's physical sensor orientation. This is specific to the Android test device's sensor mounting. The exact rotation needed depends on the physical camera hardware and display orientation conventions.
-
-**For downstream architect:** Determine the sensor mounting orientation of the target camera hardware and what coordinate transformation (if any) is needed. The behavioral requirement — that the preview is displayed with correct orientation — is in `09-ui-behaviors.md`. Do not assume 90° CW is correct for the target device.
-
-[audit: 03-capture-pipeline.md §GpuPipeline, 05-gpu-opengl.md]
+## U-10: [Camera Orientation and Sensor Mounting Angle] → RESOLVED in design/ — see design/03-metal-pipeline.md §Sensor Orientation (AVCaptureConnection.videoRotationAngle applied in AVFoundation layer before CVPixelBuffer reaches Metal; no manual UV rotation matrix needed) and design/06-decisions-log.md D-11 (exact angle value verified empirically during Phase 1a acceptance criteria)
 
 ---
 
 ## U-11: Manual Focus Infinity Distance Convention
 
-**Type:** UNCLEAR / TARGET-PLATFORM-SPECIFIC CONCERN
+**Type:** PARTIALLY RESOLVED
 
-The audit states that focus distance 0.0 diopters means "optical infinity" in the Android camera hardware abstraction layer. This inverse-distance convention (diopters = 1/meters) is specific to that camera API.
+**Settled:** iOS uses `AVCaptureDevice.lensPosition` (normalized 0.0–1.0, where 0.0 = near, 1.0 = far/infinity) — not diopters. The design commits to this convention via D-13. The API surface field `focusDistanceDiopters` is preserved by name for cross-platform shape compatibility, but on iOS it carries the normalized `lensPosition` value. The deviation is documented as a known API contract deviation (design/07-ios-specific-risks.md R-13).
 
-**For downstream architect:** Confirm that the API contract (see `10-api-contract.md`) preserving this diopter convention makes sense on the target platform. If the target platform uses a different convention (e.g., normalized 0.0–1.0, or direct meters), the API contract may need adjustment.
+**Still open:** If the product requires displaying actual diopter values to the user (e.g., "focus at 2.5 diopters"), a per-device calibration table mapping `lensPosition` to physical distance is required. No such calibration data exists yet. This is an implementation-time concern, not a design gap.
 
-[audit: 04-pigeon-api.md §CamSettings, 09-camera-controls.md]
+[design: design/06-decisions-log.md D-13, design/07-ios-specific-risks.md R-13]
 
 ---
 
@@ -169,15 +105,7 @@ The audit references to `SinkRole::RAW` reflect Android source-code symbols that
 
 ---
 
-## U-14: GL Timer Query Extension Fallback
-
-**Type:** TARGET-PLATFORM-SPECIFIC CONCERN
-
-The GPU renderer checks for a timing query extension at runtime and enables per-frame GPU timing measurements only when the extension is present.
-
-**For downstream architect:** The target platform's GPU API may have different profiling capabilities. The behavioral requirement — that the system can optionally measure per-frame GPU render time for diagnostics — is in `07-performance-budgets.md`. Determine the equivalent profiling mechanism on the target platform, if any.
-
-[audit: 05-gpu-opengl.md §GL Extension Check]
+## U-14: [GL Timer Query Extension Fallback] → RESOLVED in design/ — see design/03-metal-pipeline.md §Profiling Strategy (os_signpost intervals on all pipeline stages + Metal System Trace in Instruments; no runtime extension check needed — os_signpost is always available on iOS; frame budget table with acceptable/degraded/failing thresholds defined)
 
 ---
 
@@ -198,13 +126,13 @@ width = ((streamWidth * 480 / streamHeight) + 1) & ~1   // even-rounded
 
 ## U-16: AE FPS Range Selection for Preview vs. Recording
 
-**Type:** UNCLEAR
+**Type:** PARTIALLY RESOLVED
 
-The audit describes two different auto-exposure frame rate range policies: preview prefers a fixed (lower == upper) range for stable frame rate; recording uses `[targetFps/2, targetFps]` to allow AE to slow in dark scenes. The audit does not document what happens if no matching range is available for recording.
+**Settled:** The iOS API is `AVCaptureDevice.activeVideoMinFrameDuration` / `activeVideoMaxFrameDuration`. Preview mode: both set to `CMTimeMake(1, targetFps)` (fixed frame rate). Recording mode: `activeVideoMinFrameDuration = CMTimeMake(1, targetFps)` (upper bound), `activeVideoMaxFrameDuration = CMTimeMake(1, targetFps/2)` (allow AE to slow to half rate in dark scenes). This matches the domain intent. Documented in design/07-ios-specific-risks.md R-14.
 
-**For downstream architect:** The target platform's AE frame rate control may work differently. The behavioral requirement — that recording mode allows AE to reduce frame rate in dark scenes while capping the upper bound at the configured encoder fps — is in `03-camera-control.md`. Clarify whether the `[targetFps/2, targetFps]` range is a fixed policy or should be tunable.
+**Still open:** The fallback behavior when no fixed-rate range is available for preview mode (i.e., when the device does not support the exact 30fps fixed duration) requires empirical testing on target hardware during Phase 1a. The design does not specify a fallback policy for this case.
 
-[audit: 03-capture-pipeline.md §Repeating Request, 09-camera-controls.md §AE FPS Range Selection]
+[design: design/07-ios-specific-risks.md R-14, design/05-implementation-phases.md §Phase 1b]
 
 ---
 

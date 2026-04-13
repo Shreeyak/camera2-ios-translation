@@ -4,6 +4,11 @@ Independent iOS/Swift/Metal specialist review of `design/`, commissioned by the 
 second opinion before the formal Agent 4 (REVIEW) pass. This review is **not** part of the 4-agent
 clean-room pipeline deliverables — it is supplementary.
 
+> **Patch status legend** (annotations added after the review):
+> - **[PATCHED]** — fix applied to `design/` during the post-review patch pass
+> - **[DEFERRED]** — left to implementation time; tracked as an open concern
+> - **[N/A]** — nothing to patch (e.g., a strength confirmation)
+
 **Reviewer scope:** iOS platform correctness, Swift/SwiftUI idioms, Metal best practices, Apple
 framework API currency, iOS-specific pitfalls.
 
@@ -28,7 +33,7 @@ of those phases begins.
 
 ## Critical Issues (will break on iOS or violates a hard requirement)
 
-### C-01: GPU-to-encoder path is NOT zero-copy — violates `domain/08` requirement
+### C-01: GPU-to-encoder path is NOT zero-copy — violates `domain/08` requirement → **[PATCHED]**
 
 **File:** `03-metal-pipeline.md` lines 250–256; `06-decisions-log.md` D-03
 
@@ -57,7 +62,10 @@ output to write into this texture directly via blit encoder (GPU-side, no CPU to
 
 ---
 
-### C-02: `ConsumerRegistry.dispatch` has a silent struct-copy bug
+### C-02: `ConsumerRegistry.dispatch` has a silent struct-copy bug → **[PATCHED — but reviewer misread]**
+
+> **Patch note:** The specific claim — "write-back is missing" — turned out to be a misread; the write-back `consumers[role] = entry` was already present at line 119. However, inspection triggered by this finding uncovered a **different real bug**: `pendingFrame` was set unconditionally before the busy/idle branch, so the immediate-dispatch branch caused `markIdle` to re-dispatch the same frame. That real bug was fixed by splitting the busy/idle paths: pendingFrame is set only on the busy branch, and cleared explicitly before dispatching on the idle branch. `markIdle` now re-dispatches properly when a newer frame arrives mid-processing.
+
 
 **File:** `04-opencv-integration.md` lines 116–130
 
@@ -87,7 +95,7 @@ use `consumers[role]?.pendingFrame = frame` directly.
 
 ---
 
-### C-03: MetalRenderer texture handoff has no specified synchronization primitive
+### C-03: MetalRenderer texture handoff has no specified synchronization primitive → **[PATCHED]**
 
 **File:** `01-architecture.md` line 107; `02-concurrency.md` line 17; `03-metal-pipeline.md`
 lines 240–246
@@ -114,7 +122,7 @@ with an `os_unfair_lock` guard, documented in `03-metal-pipeline.md`.
 
 ## High Priority (works but wrong idiom or risky)
 
-### H-01: `CMSampleBuffer` crosses actor isolation boundary — Swift 6 compiler error
+### H-01: `CMSampleBuffer` crosses actor isolation boundary — Swift 6 compiler error → **[PATCHED]**
 
 **File:** `02-concurrency.md` lines 385–398
 
@@ -140,7 +148,10 @@ retain it, and pass that to the actor. Or use `sending CMSampleBuffer` parameter
 
 ---
 
-### H-02: Actor re-entrancy is not acknowledged for `processFrame`
+### H-02: Actor re-entrancy is not acknowledged for `processFrame` → **[PATCHED via F-01]**
+
+> Deferred during the pre-review patch pass; later re-raised by Agent 4 as F-01 (High) and patched then. The completion handler now captures `frameSessionState` at commit time and `onFrameReadbackComplete` guards with `guard sessionState == expectedState, sessionState == .streaming else { return }`. A Metal command buffer error check was also added.
+
 
 **File:** `02-concurrency.md` D-01 note; `03-metal-pipeline.md` §Zero-Copy Path Detail
 
@@ -156,7 +167,7 @@ buffers.
 
 ---
 
-### H-03: `MTKView` drive mode not specified
+### H-03: `MTKView` drive mode not specified → **[PATCHED]**
 
 **File:** `03-metal-pipeline.md` §Display Path; `01-architecture.md` §Layer 2
 
@@ -171,7 +182,10 @@ on texture update.
 
 ---
 
-### H-04: `NSMicrophoneUsageDescription` and `NSPhotoLibraryAddUsageDescription` not documented
+### H-04: `NSMicrophoneUsageDescription` and `NSPhotoLibraryAddUsageDescription` not documented → **[PATCHED — with product correction]**
+
+> Product correction: `NSMicrophoneUsageDescription` is **NOT** added — the app records video only, no audio. Only `NSCameraUsageDescription` and `NSPhotoLibraryAddUsageDescription` are added to `Info.plist`. See Phase 5 Info.plist Requirements table in `design/05-implementation-phases.md` and the rationale note explaining why the microphone key must not be added without actual access code.
+
 
 **File:** `05-implementation-phases.md` Phase 5; `07-ios-specific-risks.md` §Domain/11
 
@@ -186,7 +200,10 @@ The design mentions `NSCameraUsageDescription` but not:
 
 ---
 
-### H-05: `captureNaturalPicture()` in-flight guard — correct but undocumented reasoning
+### H-05: `captureNaturalPicture()` in-flight guard — correct but undocumented reasoning → **[DEFERRED]**
+
+> Code is already sound; this is a documentation-only request. Deferred to implementation time (add a comment explaining that the `guard` + set both happen synchronously before the first `await`, making this atomic by actor construction).
+
 
 **File:** `02-concurrency.md` lines 155–169
 
@@ -197,7 +214,9 @@ actor re-entrancy at `await` points makes this a non-obvious invariant.
 
 ---
 
-## Medium (worth addressing before implementation)
+## Medium (worth addressing before implementation) — all **[DEFERRED]** to implementation time
+
+> All seven Medium findings below are style / documentation / tuning improvements. None require design-level changes. They are preserved here as a durable implementation checklist.
 
 ### M-01: Deployment target never stated
 
@@ -240,14 +259,11 @@ first to complete wins — not a parallel `Task.sleep` race.
 
 ## Low / Nits
 
-- **L-01**: `ColorUniforms` should use `SIMD4<Float>` for Metal alignment safety.
-- **L-02**: Natural stream naming is consistent in prose — no change needed.
-- **L-03**: `BGRA8Unorm` in Metal vs "RGBA8888" in `IFrameConsumer` interface is a byte-order
-  mismatch. OpenCV bridge should use `cv::COLOR_BGRA2GRAY`, not `cv::COLOR_RGBA2GRAY`.
-- **L-04**: `FramePacket.pixelBuffer` is `@property (assign)` — should be `@property (strong)` or
-  have explicit retain semantics in the setter.
-- **L-05**: `scenePhase` observer creates unstructured `Task` without cancellation. Rapid
-  background↔active transitions could overlap.
+- **L-01** [DEFERRED]: `ColorUniforms` should use `SIMD4<Float>` for Metal alignment safety.
+- **L-02** [N/A]: Natural stream naming is consistent in prose — no change needed.
+- **L-03** **[PATCHED — escalated to Critical by Agent 4 as F-10]**: `BGRA8Unorm` in Metal vs "RGBA8888" in `IFrameConsumer` interface is a byte-order mismatch. OpenCV bridge now uses `cv::COLOR_BGRA2GRAY`. This was originally classified as a "Low / Nit" by the pre-reviewer, but Agent 4 correctly escalated it to Critical (F-10) because it is a silent per-frame correctness bug, not a style issue. Patched in `design/04-opencv-integration.md` line 244.
+- **L-04** [DEFERRED]: `FramePacket.pixelBuffer` is `@property (assign)` — should be `@property (strong)` or have explicit retain semantics in the setter.
+- **L-05** [DEFERRED]: `scenePhase` observer creates unstructured `Task` without cancellation. Rapid background↔active transitions could overlap.
 
 ---
 
@@ -267,7 +283,10 @@ first to complete wins — not a parallel `Task.sleep` race.
 
 ---
 
-## iOS-Specific Risks Not Yet Documented (add to 07-ios-specific-risks.md)
+## iOS-Specific Risks Not Yet Documented (add to 07-ios-specific-risks.md) — all **[PATCHED]**
+
+> All seven risks below were added to `design/07-ios-specific-risks.md` as R-21 through R-27 during the post-pre-review patch pass. R-26 was later marked NOT APPLICABLE after the product decision to drop audio from recording.
+
 
 **R-21: `AVCaptureSession` must be stopped before background for camera-in-use indicator.**
 Failure to stop the session before entering background is an iOS policy violation (App Store

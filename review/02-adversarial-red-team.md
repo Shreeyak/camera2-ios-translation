@@ -4,6 +4,11 @@
 **Primary inputs:** `design/` (architecture), `domain/` (behavioral requirements)
 **Constraint:** `audit/` not read; `00-ios-specialist-prereview.md` not echoed; findings must be independent of pre-review
 
+> **Patch status legend** (annotations added after Agent 4 review):
+> - **[PATCHED]** — fix applied to `design/` during the post-review patch pass
+> - **[DEFERRED]** — left to implementation time; tracked here as the durable reference
+> - **[N/A]** — nothing to patch (pass-through finding)
+
 ---
 
 ## Finding Format
@@ -19,10 +24,11 @@ Each finding:
 
 ## Category 1 — Race Conditions
 
-### F-01: Actor Re-entrancy in processFrame — Unpatched (High)
+### F-01: Actor Re-entrancy in processFrame — Unpatched (High) → **[PATCHED]**
 
 **Severity:** High
 **Category:** Race Conditions
+**Patch status:** **PATCHED** in `design/03-metal-pipeline.md` §Zero-Copy Path Detail. The command buffer's completedHandler now captures `frameSessionState` at commit time, and `onFrameReadbackComplete(readIndex:expectedState:)` guards with `guard sessionState == expectedState, sessionState == .streaming else { return }`. A Metal command buffer error check (`cb.status == .error`) was also added to the completion handler — this also addresses Agent 4's R-23 suggestion and the iOS specialist pre-review's H-02.
 
 **Trigger:** `CameraEngine.processFrame(_:)` calls `await commandBuffer.commit()` (or equivalent async suspension point). Between the suspension and the `commandBuffer.addCompletedHandler` callback resuming the actor, another `processFrame` call can enter and mutate session state — including tearing down the pipeline. The actor re-enters with different state than when it suspended.
 
@@ -34,10 +40,11 @@ Each finding:
 
 ---
 
-### F-02: IncomingFrame @unchecked Sendable Soundness Window (Medium)
+### F-02: IncomingFrame @unchecked Sendable Soundness Window (Medium) → **[DEFERRED]**
 
 **Severity:** Medium
 **Category:** Race Conditions
+**Patch status:** **DEFERRED** — the design's `IncomingFrame` wrapper is sound in practice: `CMSampleBuffer` retains its `CVPixelBuffer` for the lifetime of the sample buffer, and the `CaptureDelegate` holds the sample buffer until after the `Task { ... }` closure is constructed. Implementation should add a one-line comment in `CaptureDelegate.captureOutput` documenting the retention contract. No architectural change required.
 
 **Trigger:** `IncomingFrame` wraps a `CVPixelBuffer` as `@unchecked Sendable` to cross the actor boundary from the AVFoundation capture queue to `CameraEngine`. `CVPixelBuffer` is not thread-safe for concurrent write access. The contract is: capture queue retains → `IncomingFrame` struct sent → actor receives. This is sound IFF the capture queue does not reuse the buffer before the actor's `processFrame` completes.
 
@@ -51,10 +58,11 @@ Each finding:
 
 ## Category 2 — Resource Exhaustion
 
-### F-03: Background Recording Drain Without UIApplication.beginBackgroundTask (Critical)
+### F-03: Background Recording Drain Without UIApplication.beginBackgroundTask (Critical) → **[PATCHED]**
 
 **Severity:** Critical
 **Category:** Resource Exhaustion
+**Patch status:** **PATCHED** in `design/02-concurrency.md` §App Lifecycle. `backgroundSuspend()` now wraps the recording-drain path in `UIApplication.shared.beginBackgroundTask(withName:expirationHandler:)` / `endBackgroundTask`, with an expiration handler that calls `videoRecorder.cancelWriting()` to cleanly release the pool if iOS forces termination before the drain completes. Full implementation sketch present in the design.
 
 **Trigger:** User backgrounds the app while recording. `backgroundSuspend()` is called. The design specifies: stop recording → `AVAssetWriter.finishWriting` → 5s drain timeout → `AVAssetWriter.cancelWriting` on timeout. iOS gives an app approximately 5 seconds of execution after `scenePhase == .background` before suspending the process. The recording drain alone consumes that window.
 
@@ -75,10 +83,11 @@ This extends the window from ~5s to up to 30s on modern iOS. Add this as a Phase
 
 ---
 
-### F-04: Encoder Pixel Buffer Pool Exhaustion Under Thermal Backpressure (Medium)
+### F-04: Encoder Pixel Buffer Pool Exhaustion Under Thermal Backpressure (Medium) → **[DEFERRED]**
 
 **Severity:** Medium
 **Category:** Resource Exhaustion
+**Patch status:** **DEFERRED** — partial mitigation already in `design/03-metal-pipeline.md` §GPU-to-Encoder Path (pool exhaustion drops the recording frame only, not the preview frame, and increments a `RECORDER_POOL_EXHAUSTED` counter). `maximumBufferCount` sizing (≥6) should be set at implementation time in Phase 5; this is a one-line configuration in the `AVAssetWriterInputPixelBufferAdaptor` pixel buffer attributes dict. No architectural change required.
 
 **Trigger:** `AVAssetWriterInputPixelBufferAdaptor` maintains a pool of IOSurface-backed `CVPixelBuffer`s. Each frame dequeues a buffer, GPU-blits into it, then the adaptor takes ownership via `append`. The buffer is returned to the pool only after VideoToolbox finishes encoding the frame. Under thermal stress (R-01: `.serious` → reduced fps), the frame rate drops but the encoder's compression queue may back up. If the pool is sized to match the expected encoding latency at 30fps, a backlog at 15fps (doubled latency per frame) exhausts the pool. `CVPixelBufferPoolCreatePixelBuffer` returns `kCVReturnWouldExceedAllocationThreshold` — a non-fatal error the design does not explicitly handle.
 
@@ -92,10 +101,11 @@ This extends the window from ~5s to up to 30s on modern iOS. Add this as a Phase
 
 ## Category 3 — Timing
 
-### F-05: OpenCV Canny at Full Sensor Resolution Exceeds Frame Budget (High)
+### F-05: OpenCV Canny at Full Sensor Resolution Exceeds Frame Budget (High) → **[PATCHED]**
 
 **Severity:** High
 **Category:** Timing
+**Patch status:** **PATCHED** in `design/04-opencv-integration.md` §Role Selection (new section) and `design/05-implementation-phases.md` Phase 3 acceptance criteria. `EdgeDetectionConsumer::configure()` now asserts `role == ConsumerRole::Tracker` and returns `false` for any other role — DEBUG builds assert, release builds refuse registration. The design includes a budget table showing ~80–120ms on full-res vs ~2–4ms on tracker (480px). Phase 3 acceptance criterion explicitly bans full-resolution registration and adds an 8–12 ms performance bound. This also subsumes F-11.
 
 **Trigger:** `ConsumerRole.ProcessedFullResolution` delivers frames at 4160×3120 (or configured resolution). `EdgeDetectionConsumer.onFrame()` receives a `FrameData` with `width * height * 4 = ~49.5 MB` of pixel data. `cv::cvtColor` allocates a `49.5 MB / 4 = ~12.4 MB` grayscale buffer. `cv::Canny` allocates additional intermediate buffers and runs Sobel gradient computation over the full image. On current-generation Apple silicon this is 30–60ms for a 4160×3120 Canny pass.
 
@@ -109,10 +119,11 @@ This extends the window from ~5s to up to 30s on modern iOS. Add this as a Phase
 
 ---
 
-### F-06: AVAssetWriter.finishWriting Completion Handler Actor Hop Latency (Low)
+### F-06: AVAssetWriter.finishWriting Completion Handler Actor Hop Latency (Low) → **[DEFERRED]**
 
 **Severity:** Low
 **Category:** Timing
+**Patch status:** **DEFERRED** — this is a theoretical concern; the 5s drain timeout has substantial headroom for typical actor mailbox depth (microseconds to low milliseconds). If it manifests in Phase 5 testing, the mitigation (increase timeout, or use a direct continuation instead of a `Task { ... }` hop) is a simple tuning change. No architectural change required.
 
 **Trigger:** `VideoRecorder.stopRecording()` calls `AVAssetWriter.finishWriting(completionHandler:)`. The completion handler fires on an AVFoundation internal queue. The handler wraps a `Task { await engine.onRecordingFinished() }`, hopping back to the `CameraEngine` actor. Under actor queue pressure (e.g., during recovery), this hop can be delayed by the actor's mailbox depth.
 
@@ -126,10 +137,11 @@ This extends the window from ~5s to up to 30s on modern iOS. Add this as a Phase
 
 ## Category 4 — iOS Edge Cases
 
-### F-07: NSMicrophoneUsageDescription and NSPhotoLibraryAddUsageDescription Absent (High)
+### F-07: NSMicrophoneUsageDescription and NSPhotoLibraryAddUsageDescription Absent (High) → **[PATCHED — with product correction]**
 
 **Severity:** High
 **Category:** iOS Edge Cases
+**Patch status:** **PATCHED** in `design/05-implementation-phases.md` Phase 5 — explicit Info.plist requirements table added with `NSCameraUsageDescription` and `NSPhotoLibraryAddUsageDescription`. **Product correction:** `NSMicrophoneUsageDescription` is **explicitly NOT added** because the product decision is that recordings are **silent video only** — the app does not capture audio. `AVCaptureAudioDataOutput`, `AVAudioSession` configuration, and microphone permission are all out of scope. Phase 5 file tree no longer includes `AudioSyncHandler.swift`; `VideoRecorder` creates `AVAssetWriter` with a single video input only. R-26 (audio session conflict) marked NOT APPLICABLE in the risk register. This also addresses the iOS specialist pre-review's H-04.
 
 **Trigger:** Phase 5 introduces `AVCaptureAudioDataOutput` (for video recording with audio) and `PHPhotoLibrary.performChanges` (for saving stills). Both require Info.plist usage description strings: `NSMicrophoneUsageDescription` and `NSPhotoLibraryAddUsageDescription`. If these are missing, iOS 14+ **crashes at first audio or photo library access** — not a runtime permission denial, an actual crash with `This app has crashed because it attempted to access privacy-sensitive data without a usage description`.
 
@@ -141,10 +153,11 @@ This extends the window from ~5s to up to 30s on modern iOS. Add this as a Phase
 
 ---
 
-### F-08: Phone Call / FaceTime Interruption Leaves Recording in Ambiguous State (Medium)
+### F-08: Phone Call / FaceTime Interruption Leaves Recording in Ambiguous State (Medium) → **[DEFERRED]**
 
 **Severity:** Medium
 **Category:** iOS Edge Cases
+**Patch status:** **DEFERRED** — the existing `AVCaptureSessionWasInterruptedNotification` handler (R-05) covers the infrastructure. The missing piece is the branch "if recording is active, call `stopRecording()` cleanly before entering the interrupted state." This is a ~10-line addition at implementation time. Note: since F-07 established that this product is video-only, the `AudioDeviceInUseByAnotherClient` interruption reason cannot occur — the app never touches `AVAudioSession`. The remaining case is `VideoDeviceInUseByAnotherClient` (camera app launched from Control Center), which is rare and handled by the generic interruption path. Phase 5 should add a manual-test acceptance criterion for recording-during-interruption.
 
 **Trigger:** R-05 documents `AVCaptureSessionWasInterruptedNotification` with `VideoDeviceNotAvailableWithMultipleForegroundApps` as handled (non-fatal, self-healing). However, an incoming phone call or FaceTime call triggers a different interruption reason: `AVCaptureSessionInterruptionReasonAudioDeviceInUseByAnotherClient` or `VideoDeviceInUseByAnotherClient`. If recording is active when this interruption fires, `AVAssetWriter` receives no more frames but is not explicitly stopped.
 
@@ -158,10 +171,11 @@ This extends the window from ~5s to up to 30s on modern iOS. Add this as a Phase
 
 ## Category 5 — Escape Hatch Abuse
 
-### F-09: Zero Audit Lookups — No Issues Found (Pass)
+### F-09: Zero Audit Lookups — No Issues Found (Pass) → **[N/A]**
 
 **Severity:** N/A
 **Category:** Escape Hatch Abuse — PASS
+**Patch status:** N/A — pass-through, nothing to patch.
 
 The design contains zero audit lookups. `design/08-audit-lookups.md` confirms all values (performance budgets, stall thresholds, tracker dimension formula, encoder bitrate) are sourced from `domain/` files. No Android implementation detail was imported without transformation. The "what not to port" confirmation table in `07-ios-specific-risks.md` is complete and accurate.
 
@@ -171,10 +185,11 @@ No findings in this category.
 
 ## Category 6 — OpenCV Correctness
 
-### F-10: cv::COLOR_RGBA2GRAY Must Be cv::COLOR_BGRA2GRAY (Critical)
+### F-10: cv::COLOR_RGBA2GRAY Must Be cv::COLOR_BGRA2GRAY (Critical) → **[PATCHED]**
 
 **Severity:** Critical
 **Category:** OpenCV Correctness
+**Patch status:** **PATCHED** in `design/04-opencv-integration.md` line 238–244. Changed to `cv::COLOR_BGRA2GRAY`, renamed `cv::Mat rgba` → `cv::Mat bgra`, and added a multi-line comment explaining exactly why `COLOR_RGBA2GRAY` is silently wrong for Metal's `BGRA8Unorm` output and the asymmetric R-vs-B luminance weights. Phase 3 acceptance should include a unit test creating a known-blue pixel and verifying the grayscale value is ~77 (correct) not ~29 (wrong).
 
 **Trigger:** Every call to `EdgeDetectionBridge.processFrame()` at runtime.
 
@@ -190,10 +205,11 @@ This produces incorrect luminance: red objects appear dark, blue objects appear 
 
 ---
 
-### F-11: EdgeDetectionConsumer Allocated at Full Resolution for ProcessedFullResolution Role (Medium)
+### F-11: EdgeDetectionConsumer Allocated at Full Resolution for ProcessedFullResolution Role (Medium) → **[PATCHED — subsumed by F-05]**
 
 **Severity:** Medium
 **Category:** OpenCV Correctness
+**Patch status:** **PATCHED** together with F-05. The role-selection fix for F-05 (EdgeDetectionConsumer now asserts `ConsumerRole::Tracker`-only) reduces peak OpenCV allocation from ~70–80 MB (full-res) to ~2–3 MB (480px). Memory pressure cascade risk eliminated.
 
 **Trigger:** `ConsumerRole.ProcessedFullResolution` is the role assigned to `EdgeDetectionConsumer` in `ConsumerRegistry`. At 4160×3120, `cv::Mat rgba(height, width, CV_8UC4, baseAddress, bytesPerRow)` wraps ~49.5 MB. `cv::cvtColor` allocates ~12.4 MB grayscale. `cv::Canny` allocates additional gradient/magnitude buffers.
 
@@ -207,28 +223,26 @@ This produces incorrect luminance: red objects appear dark, blue objects appear 
 
 ## Adversarial Summary Table
 
-| Finding | Severity | Category | Status |
+| Finding | Severity | Category | Patch Status |
 |---|---|---|---|
-| F-01: Actor re-entrancy in processFrame (H-02 unpatched) | High | Race Conditions | NEW (unpatched pre-review) |
-| F-02: IncomingFrame @unchecked Sendable retention | Medium | Race Conditions | NEW |
-| F-03: Background recording drain without beginBackgroundTask | **Critical** | Resource Exhaustion | NEW |
-| F-04: Encoder pool exhaustion under thermal backpressure | Medium | Resource Exhaustion | NEW |
-| F-05: OpenCV Canny at full resolution exceeds frame budget | High | Timing | NEW |
-| F-06: finishWriting actor hop latency | Low | Timing | NEW |
-| F-07: NSMicrophoneUsageDescription + NSPhotoLibraryAddUsageDescription absent (H-04 unpatched) | High | iOS Edge Cases | UNPATCHED pre-review |
-| F-08: Phone call interruption + active recording | Medium | iOS Edge Cases | NEW |
-| F-09: Zero audit lookups — no findings | N/A | Escape Hatch | PASS |
-| F-10: cv::COLOR_RGBA2GRAY must be cv::COLOR_BGRA2GRAY | **Critical** | OpenCV Correctness | NEW |
-| F-11: EdgeDetectionConsumer at full resolution | Medium | OpenCV Correctness | NEW |
+| F-01: Actor re-entrancy in processFrame | High | Race Conditions | **PATCHED** (guard + Metal error check in 03-metal-pipeline.md) |
+| F-02: IncomingFrame @unchecked Sendable retention | Medium | Race Conditions | **DEFERRED** (retention contract sound; doc comment at implementation) |
+| F-03: Background recording drain without beginBackgroundTask | **Critical** | Resource Exhaustion | **PATCHED** (beginBackgroundTask + expirationHandler in 02-concurrency.md) |
+| F-04: Encoder pool exhaustion under thermal backpressure | Medium | Resource Exhaustion | **DEFERRED** (partial mitigation present; `maximumBufferCount` tuning at implementation) |
+| F-05: OpenCV Canny at full resolution exceeds frame budget | High | Timing | **PATCHED** (Tracker-only role; assertion in configure()) |
+| F-06: finishWriting actor hop latency | Low | Timing | **DEFERRED** (theoretical; tune timeout if it manifests) |
+| F-07: NSMicrophoneUsageDescription + NSPhotoLibraryAddUsageDescription absent | High | iOS Edge Cases | **PATCHED with product correction** — mic NOT added (video-only recording); photo library added |
+| F-08: Phone call interruption + active recording | Medium | iOS Edge Cases | **DEFERRED** (audio-interruption path N/A post-F-07; video-interruption is 10-line impl addition) |
+| F-09: Zero audit lookups — no findings | N/A | Escape Hatch | N/A (pass) |
+| F-10: cv::COLOR_RGBA2GRAY must be cv::COLOR_BGRA2GRAY | **Critical** | OpenCV Correctness | **PATCHED** (COLOR_BGRA2GRAY + variable rename + warning comment) |
+| F-11: EdgeDetectionConsumer at full resolution | Medium | OpenCV Correctness | **PATCHED** (subsumed by F-05 role fix) |
 
-**Critical findings: 2 (F-03, F-10)**
-**High findings: 3 (F-01, F-05, F-07)**
-**Medium findings: 4 (F-02, F-04, F-08, F-11)**
-**Low findings: 1 (F-06)**
+**As of Agent 4 review:** 2 Critical, 3 High, 4 Medium, 1 Low.
+**Post-patch:** 0 Critical, 0 High, 3 Medium deferred, 1 Low deferred. All patched items verified in design/ via grep + file read.
 
 ---
 
-## Adversarial Verdict
+## Adversarial Verdict (as of Agent 4 review)
 
 **YELLOW**
 
@@ -241,3 +255,18 @@ Two Critical findings are present:
 Neither finding represents a **fundamental design flaw** that would require architectural changes — both are localized, fixable issues. The overall design structure (actor isolation, zero-copy paths, Metal pipeline, ObjC++ bridge) is sound. However, two Criticals disqualify a Green verdict.
 
 The three High findings (F-01 actor re-entrancy, F-05 Canny resolution, F-07 Info.plist strings) should be resolved before Phase 3 implementation begins. F-07 in particular is an App Store rejection risk that has been identified in both the pre-review and this review.
+
+## Post-Patch Adversarial Verdict
+
+**GREEN** (implementation-ready)
+
+Both Criticals patched in `design/`:
+- F-10: `cv::COLOR_BGRA2GRAY` + variable rename + warning comment (design/04-opencv-integration.md)
+- F-03: `beginBackgroundTask` + expiration handler wrap on `backgroundSuspend()` (design/02-concurrency.md)
+
+All three Highs patched:
+- F-01: state-guard + Metal error check on completion handler (design/03-metal-pipeline.md)
+- F-05: `EdgeDetectionConsumer` locked to `ConsumerRole::Tracker` via configure() assertion (design/04-opencv-integration.md)
+- F-07: Info.plist keys documented with explicit rationale for omitting mic (video-only product)
+
+The four remaining Medium/Low findings (F-02, F-04, F-06, F-08) are deferred as implementation-time concerns with concrete mitigation notes. None require design-level changes. The design is ready for Phase 1a implementation start.

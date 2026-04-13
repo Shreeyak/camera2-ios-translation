@@ -103,24 +103,24 @@ solve these problems from first principles using the target platform's native ca
 The following items require resolution by the downstream architect before finalizing the design.
 Items are numbered for cross-reference:
 
-| # | Topic | Type |
+| # | Topic | iOS Status |
 |---|---|---|
-| U-01 | Camera permission flow and denial recovery | Platform-specific |
-| U-02 | GPU API and camera-to-GPU frame delivery | Platform-specific |
-| U-03 | GPU-to-encoder zero-copy availability | Platform-specific |
-| U-04 | Preview texture / GPU-to-UI-framework integration | Platform-specific |
-| U-05 | Thermal throttling and system pressure | Platform-specific |
-| U-06 | Actor isolation and concurrency model choice | Platform-specific |
-| U-07 | Definition of "fully invisible" in app lifecycle | Unclear |
-| U-08 | Supported resolution discovery mechanism | Platform-specific (partial: 4:3 rationale resolved) |
-| U-09 | EXIF metadata writing API | Platform-specific |
-| U-10 | Camera sensor orientation and required transform | Platform-specific |
-| U-11 | Focus distance diopter convention on target platform | Unclear / Platform-specific |
+| U-01 | Camera permission flow and denial recovery | **Resolved:** `PermissionManager` + `scenePhase`; see design/02-concurrency.md, design/07-ios-specific-risks.md R-03, R-04 |
+| U-02 | GPU API and camera-to-GPU frame delivery | **Resolved:** Metal + `CVMetalTextureCache` zero-copy; see design/03-metal-pipeline.md |
+| U-03 | GPU-to-encoder zero-copy availability | **Resolved:** IOSurface-backed `CVPixelBufferPool` + `MTLBlitCommandEncoder`; see design/03-metal-pipeline.md |
+| U-04 | Preview texture / GPU-to-UI-framework integration | **Resolved:** `MTKView` via `UIViewRepresentable` (two instances); see design/01-architecture.md |
+| U-05 | Thermal throttling and system pressure | **Resolved:** `ProcessInfo.thermalStateDidChangeNotification` + `systemPressureState` KVO; see design/02-concurrency.md |
+| U-06 | Actor isolation and concurrency model choice | **Resolved:** Swift actors enforce all 11 invariants structurally; see design/02-concurrency.md |
+| U-07 | Definition of "fully invisible" in app lifecycle | **Resolved:** `scenePhase == .background` (not `.inactive`); see design/02-concurrency.md, D-08 |
+| U-08 | Supported resolution discovery mechanism | **Partial (pre-existing):** 4:3 rationale resolved; iOS API (`AVCaptureDevice.formats`) to be confirmed during Phase 1a |
+| U-09 | EXIF metadata writing API | **Partial:** `CGImageDestination` + `"CamPlugin/v1"` key settled; JSON field schema deferred to Phase 5 |
+| U-10 | Camera sensor orientation and required transform | **Resolved:** `AVCaptureConnection.videoRotationAngle`; angle value verified empirically in Phase 1a; see design/03-metal-pipeline.md, D-11 |
+| U-11 | Focus distance diopter convention on target platform | **Partial:** iOS uses `lensPosition` (0–1); diopter conversion requires per-device calibration; see D-13, R-13 |
 | U-12 | Front-facing camera preview mirroring behavior | **Resolved:** front camera out of scope |
 | U-13 | Whether C++ consumers can register for natural stream | **Resolved:** no — natural is display-only |
-| U-14 | GPU timer / profiling capabilities | Platform-specific |
+| U-14 | GPU timer / profiling capabilities | **Resolved:** `os_signpost` + Metal System Trace; see design/03-metal-pipeline.md §Profiling Strategy |
 | U-15 | Tracker resolution height (480px) rationale | **Resolved:** fixed compile-time value |
-| U-16 | AE frame rate range policy for recording | Unclear |
+| U-16 | AE frame rate range policy for recording | **Partial:** `activeVideoMinFrameDuration`/`activeVideoMaxFrameDuration` committed; preview fallback policy needs hardware testing; see R-14 |
 | U-17 | Maximum concurrent sessions | **Resolved:** single session; back-facing main lens only |
 
 ---

@@ -7,11 +7,20 @@
 
 ---
 
-## Overall Verdict: YELLOW — Conditional Approval
+## Original Verdict: YELLOW — Conditional Approval
 
 The iOS translation design is structurally sound. The core architecture (Swift actor isolation, Metal zero-copy pipeline, ObjC++ bridge, ConsumerRegistry) is correctly specified and all four pre-review critical findings (C-01, C-02, C-03, H-01) are confirmed patched. The design is implementable.
 
 Two findings prevent a Green verdict: a silent OpenCV color channel bug that makes edge detection always produce wrong output, and an unprotected background recording drain that risks file corruption when the user backgrounds during recording. Neither is architecturally complex to fix; both must be addressed before Phase 3 and Phase 5 implementation respectively.
+
+## Post-Patch Verdict: GREEN — Implementation-Ready
+
+All Critical and High findings from both this review and the iOS specialist pre-review have been patched in `design/`. See individual finding annotations in `01-correctness-check.md` and `02-adversarial-red-team.md` for per-item `[PATCHED]` / `[DEFERRED]` status.
+
+**Patched:** F-01, F-03, F-05, F-07, F-10, F-11 (and C-01, C-02, C-03, H-01, H-02, H-03, H-04 from the pre-review).
+**Deferred (implementation-time only):** F-02, F-04, F-06, F-08 — all documented with concrete mitigation recipes.
+
+The design is ready for Phase 1a implementation start.
 
 ---
 
@@ -31,16 +40,18 @@ Two findings prevent a Green verdict: a silent OpenCV color channel bug that mak
 
 ---
 
-## Recommended Next Step
+## Recommended Next Step (original — superseded by patches)
 
-**Before Phase 3 begins:**
-1. Fix F-10 (`COLOR_BGRA2GRAY`) in `04-opencv-integration.md`
-2. Fix F-01 (add state guard to `onFrameReadbackComplete`) in `02-concurrency.md` + `CameraEngine` design
-3. Add F-07 to Phase 1a acceptance criteria: `Info.plist` must include `NSMicrophoneUsageDescription` and `NSPhotoLibraryAddUsageDescription`
+~~**Before Phase 3 begins:**~~
+1. ~~Fix F-10 (`COLOR_BGRA2GRAY`) in `04-opencv-integration.md`~~ **[PATCHED]**
+2. ~~Fix F-01 (add state guard to `onFrameReadbackComplete`) in `02-concurrency.md` + `CameraEngine` design~~ **[PATCHED in 03-metal-pipeline.md]**
+3. ~~Add F-07 to Phase 1a acceptance criteria: `Info.plist` must include `NSMicrophoneUsageDescription` and `NSPhotoLibraryAddUsageDescription`~~ **[PATCHED with product correction: video-only, no microphone key]**
 
-**Before Phase 5 begins:**
-4. Fix F-03 (beginBackgroundTask for recording drain) in `05-implementation-phases.md` Phase 5 acceptance criteria and `07-ios-specific-risks.md` (new risk R-28)
-5. Decide F-05/F-11: assign `EdgeDetectionConsumer` to `ConsumerRole.Tracker` (recommended) or document the resolution limitation explicitly
+~~**Before Phase 5 begins:**~~
+4. ~~Fix F-03 (beginBackgroundTask for recording drain) in `05-implementation-phases.md` Phase 5 acceptance criteria and `07-ios-specific-risks.md` (new risk R-28)~~ **[PATCHED in 02-concurrency.md]**
+5. ~~Decide F-05/F-11: assign `EdgeDetectionConsumer` to `ConsumerRole.Tracker` (recommended) or document the resolution limitation explicitly~~ **[PATCHED: configure() asserts Tracker-only]**
+
+**Current next step:** proceed to Phase 1a implementation in a fresh app workspace (see `implementation` section below).
 
 ---
 
