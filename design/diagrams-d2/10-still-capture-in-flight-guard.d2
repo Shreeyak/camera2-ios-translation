@@ -1,0 +1,36 @@
+# 10 — Still capture in-flight guard
+# Actor isolation replaces a lock via synchronous guard+set before first await.
+# Cross-ref: design/02-concurrency.md §Invariant 7
+
+shape: sequence_diagram
+
+VM: CameraViewModel
+SC: "StillCaptureController\n(actor)"
+APO: AVCapturePhotoOutput
+EX: EXIFWriter
+FS: FileSystem
+
+First capture call — actor is idle: {
+  VM -> SC: "await captureNaturalPicture()"
+  SC -> SC: "guard !captureInFlight else throw INVALID_STATE\n(synchronous — before any await)"
+  SC -> SC: "captureInFlight = true"
+  SC -> SC: "defer { captureInFlight = false }"
+  SC -> APO: "capturePhoto(with: settings, delegate: self)\n(await suspension point)"
+}
+
+Second capture call arrives while first is in-flight: {
+  VM -> SC: "await captureNaturalPicture()  [concurrent]"
+  SC -> SC: "guard !captureInFlight\ncaptureInFlight == true ⇒ throw"
+  SC -> VM: "throw CameraError(.invalidState)"
+}
+
+First capture's photo delivery resumes: {
+  APO -> SC: didFinishProcessingPhoto (delegate)
+  SC -> SC: receive AVCapturePhoto
+  SC -> EX: buildEXIFProperties(sensor metadata)
+  EX -> SC: CFDictionary of EXIF tags
+  SC -> FS: write JPEG to temp URL
+  SC -> EX: "CGImageDestinationAddImageFromSource\nwith EXIF dict"
+  FS -> SC: path
+  SC -> VM: "return path\n(defer fires: captureInFlight = false)"
+}

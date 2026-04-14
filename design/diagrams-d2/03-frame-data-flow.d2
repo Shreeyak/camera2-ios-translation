@@ -1,0 +1,133 @@
+# 03 — Frame data-flow
+# The 4-stream structural flow: Capture → Metal compute → (processed, natural, tracker, encoder).
+# Ownership details are in design/09-architecture-diagrams.md §3b.
+# Cross-ref: design/03-metal-pipeline.md, domain/02-frame-delivery.md
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+direction: down
+
+classes: {
+  hw: {
+    style.fill: "#fff7ed"
+    style.stroke: "#c2410c"
+  }
+  avf: {
+    style.fill: "#f1f5f9"
+    style.stroke: "#475569"
+  }
+  actor: {
+    style.fill: "#eef2ff"
+    style.stroke: "#4f46e5"
+  }
+  display: {
+    style.fill: "#dcfce7"
+    style.stroke: "#15803d"
+  }
+  record: {
+    style.fill: "#fee2e2"
+    style.stroke: "#b91c1c"
+  }
+  consume: {
+    style.fill: "#fef3c7"
+    style.stroke: "#b45309"
+  }
+  texture: {
+    style.fill: "#faf5ff"
+    style.stroke: "#7c3aed"
+  }
+}
+
+HW: "Back-main camera sensor" {
+  class: hw
+}
+
+Capture: AVCaptureSession {
+  class: avf
+  AVOut: AVCaptureVideoDataOutput { class: avf }
+  AVPhoto: AVCapturePhotoOutput { class: avf }
+}
+
+CD: CaptureDelegate { class: avf }
+
+EngineWork: "CameraEngine actor — per frame work" {
+  class: actor
+  CE: CameraEngine.processFrame { class: actor }
+  Wrap: CVMetalTextureCache wrap { class: actor }
+  Compute: "Metal compute kernel\nYCbCr → BGRA\n5-stage color pipeline" {
+    class: actor
+    style.fill: "#e0e7ff"
+  }
+  CE -> Wrap
+  Wrap -> Compute: "Y plane (R8Unorm)"
+  Wrap -> Compute: "CbCr plane (RG8Unorm)"
+}
+
+Proc: "processedTexture\nBGRA8Unorm full-res" { class: texture }
+Nat: "naturalTexture\nBGRA8Unorm passthrough" { class: texture }
+Trk: "trackerTexture\nBGRA8Unorm 480px" { class: texture }
+EncT: "encoderTexture\n(only while recording)" { class: texture }
+
+PSlot: "processedTextureSlot\nOSAllocatedUnfairLock" { class: display }
+NSlot: "naturalTextureSlot\nOSAllocatedUnfairLock" { class: display }
+
+RB: "readbackBuffer[0/1]\ndouble-buffered" { class: actor }
+TRB: trackerReadbackBuffer { class: actor }
+
+MR: MetalRenderer.draw { class: display }
+NMR: NaturalMetalRenderer.draw { class: display }
+
+Disp1: "MTKView\nprocessed preview" { class: display }
+Disp2: "MTKView\nnatural preview" { class: display }
+
+CR: "ConsumerRegistry\ndispatch (tracker role)" { class: consume }
+EDC: "EdgeDetectionConsumer\ncv::Canny" { class: consume }
+
+Pool: "CVPixelBufferPool\nIOSurface-backed" { class: record }
+AW: "AVAssetWriterInput\nPixelBufferAdaptor" { class: record }
+VT: VideoToolbox encoder { class: record }
+
+HW -> Capture.AVOut
+HW -> Capture.AVPhoto
+
+Capture.AVOut -> CD: "CVPixelBuffer\nYpCbCr 4:2:0 BiPlanar\n~4000x3000"
+CD -> EngineWork.CE: IncomingFrame
+
+EngineWork.Compute -> Proc
+EngineWork.Compute -> Nat
+EngineWork.Compute -> Trk
+EngineWork.Compute -> EncT: recording only {
+  style.stroke-dash: 3
+}
+
+Proc -> PSlot: publish
+Proc -> RB: blit
+Nat -> NSlot: publish
+Trk -> TRB: blit
+
+PSlot -> MR
+NSlot -> NMR
+MR -> Disp1: present
+NMR -> Disp2: present
+
+TRB -> CR: "wrap FramePacket\n(CPU-visible)"
+CR -> EDC: "AsyncStream\nbufferingNewest(1)" {
+  style.stroke-dash: 3
+}
+
+EncT -> Pool: "GPU-local blit\nstays in IOSurface" {
+  style.stroke-dash: 3
+  style.stroke: "#059669"
+}
+Pool -> AW: adaptor.append {
+  style.stroke-dash: 3
+}
+AW -> VT: same IOSurface {
+  style.stroke-dash: 3
+  style.stroke: "#059669"
+}

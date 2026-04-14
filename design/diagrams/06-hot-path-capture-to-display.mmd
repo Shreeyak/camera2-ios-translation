@@ -1,0 +1,61 @@
+sequenceDiagram
+    autonumber
+    participant HW as Camera HW
+    participant AVF as AVCaptureSession
+    participant CDQ as captureQueue<br/>(serial)
+    participant CD as CaptureDelegate<br/>(nonisolated)
+    participant CE as CameraEngine<br/>(actor)
+    participant MTLQ as MTLCommandQueue
+    participant GPU as GPU
+    participant Lock as textureSlot<br/>(OSAllocatedUnfairLock)
+    participant MR as MetalRenderer<br/>(nonisolated)
+    participant MTK as MTKView
+
+    HW->>AVF: sensor frame (~33ms cadence)
+    AVF->>CDQ: dispatch didOutput sampleBuffer
+    CDQ->>CD: captureOutput(_:didOutput:from:)
+    CD->>CD: CMSampleBufferGetImageBuffer → CVPixelBuffer
+    CD->>CD: wrap as IncomingFrame (Sendable)
+    CD->>CE: Task { await processFrame(packet) }
+
+    activate CE
+    CE->>CE: CVMetalTextureCache wrap → Y + CbCr
+    CE->>MTLQ: makeCommandBuffer
+    CE->>MTLQ: encode compute pass
+    CE->>MTLQ: encode blits — processed readback,<br/>tracker readback, encoder (if recording)
+    CE->>CE: frameSessionState = sessionState
+    CE->>MTLQ: addCompletedHandler { ... }
+    CE->>MTLQ: commit
+    CE->>Lock: withLock { $0 = processedTexture }
+    CE->>MTK: Task @MainActor { setNeedsDisplay() }
+    deactivate CE
+
+    MTLQ->>GPU: submit
+    Note right of GPU: Compute + blit execute asynchronously<br/>GPU budget ~5–8 ms
+
+    par GPU execution
+        GPU->>GPU: run compute + blit
+    and MTKView redraw request
+        MTK->>MR: draw(_:)
+        activate MR
+        MR->>Lock: withLock { $0 }
+        Lock-->>MR: MTLTexture reference
+        MR->>MTLQ: makeCommandBuffer
+        MR->>MTLQ: blit texture → currentDrawable
+        MR->>MTK: commandBuffer.present(drawable)
+        MR->>MTLQ: commit
+        deactivate MR
+    end
+
+    GPU-->>MTLQ: command buffer complete
+    MTLQ->>CE: addCompletedHandler fires<br/>(Metal internal thread)
+
+    activate CE
+    CE->>CE: if cb.status == .error → handleNonFatalError and return
+    CE->>CE: Task { await onFrameReadbackComplete(readIndex, expectedState) }
+    CE->>CE: guard sessionState == expectedState == .streaming
+    CE->>CE: readbackBuffer[readIndex].contents() → FramePacket
+    CE->>CE: await ConsumerRegistry.dispatch(frame, .tracker)
+    deactivate CE
+
+    Note over HW,MTK: Total capture-to-display latency: target < 16 ms,<br/>budget < 25 ms, fail > 25 ms

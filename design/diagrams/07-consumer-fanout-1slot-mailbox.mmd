@@ -1,0 +1,56 @@
+sequenceDiagram
+    autonumber
+    participant CE as CameraEngine actor
+    participant CR as ConsumerRegistry actor
+    participant CQ as Consumer DispatchQueue<br/>(serial, per consumer)
+    participant BR as EdgeDetectionBridge<br/>(ObjC++)
+    participant CPP as EdgeDetectionConsumer<br/>(C++)
+
+    Note over CE,CPP: Frame N arrives — consumer is idle
+
+    CE->>CR: await dispatch(frameN, .tracker)
+    activate CR
+    CR->>CR: guard var entry = consumers[.tracker]
+    CR->>CR: entry.isProcessing == false → idle branch
+    CR->>CR: entry.isProcessing = true<br/>entry.pendingFrame = nil<br/>consumers[.tracker] = entry
+    CR->>CQ: queue.async { bridge.processFrame(frameN) }
+    CR-->>CE: return
+    deactivate CR
+
+    activate CQ
+    CQ->>BR: processFrame(frameN)
+    BR->>CPP: onFrame(frameData)
+    CPP->>CPP: cv::cvtColor BGRA → gray
+    CPP->>CPP: cv::Canny
+    CPP->>CPP: cv::findContours
+    CPP-->>BR: EdgeDetectionResult
+
+    Note over CE,CPP: Frame N+1 arrives while consumer is still busy
+    CE->>CR: await dispatch(frameN+1, .tracker)
+    activate CR
+    CR->>CR: entry.isProcessing == true → busy branch
+    CR->>CR: entry.pendingFrame = frameN+1<br/>consumers[.tracker] = entry
+    CR-->>CE: return (no queue dispatch)
+    deactivate CR
+
+    Note over CE,CPP: Frame N+2 arrives — N+1 is overwritten (dropped)
+    CE->>CR: await dispatch(frameN+2, .tracker)
+    activate CR
+    CR->>CR: entry.pendingFrame = frameN+2<br/>(frameN+1 silently dropped)
+    CR-->>CE: return
+    deactivate CR
+
+    BR-->>CQ: processFrame(frameN) complete
+    CQ->>CR: Task { await markIdle(.tracker) }
+    deactivate CQ
+
+    activate CR
+    CR->>CR: entry.pendingFrame == frameN+2
+    CR->>CR: entry.pendingFrame = nil<br/>(keep isProcessing = true)
+    CR->>CQ: queue.async { bridge.processFrame(frameN+2) }
+    deactivate CR
+
+    activate CQ
+    CQ->>BR: processFrame(frameN+2)
+    Note right of BR: frameN+1 was silently dropped<br/>per drop-on-busy policy — this is correct<br/>per domain/02-frame-delivery.md
+    deactivate CQ

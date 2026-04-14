@@ -1,0 +1,43 @@
+sequenceDiagram
+    autonumber
+    participant VM as CameraViewModel
+    participant CE as CameraEngine actor
+    participant GPU as Metal GPU
+    participant CH as Completion handler<br/>(Metal internal thread)
+
+    Note over VM,CH: Actor is busy with processFrame(N)
+
+    VM->>CE: await close()
+    Note right of CE: close() is enqueued in the actor mailbox —<br/>will run after processFrame(N) returns
+
+    activate CE
+    CE->>CE: processFrame(N) — encode command buffer
+    CE->>CE: frameSessionState = sessionState<br/>// captured as .streaming
+    CE->>CE: addCompletedHandler { cb in<br/>  if cb.status == .error { ... return }<br/>  Task { await onFrameReadbackComplete(<br/>    readIndex: i, expectedState: .streaming)<br/>  }<br/>}
+    CE->>CE: commandBuffer.commit()
+    CE->>CE: writeIndex = 1 - writeIndex
+    CE-->>CE: processFrame(N) returns
+    deactivate CE
+
+    Note over CE: Actor mailbox pumps — close() runs
+
+    activate CE
+    CE->>CE: close()
+    CE->>CE: gpuStallWatchdogTask.cancel()
+    CE->>CE: retryTask?.cancel()
+    CE->>CE: sessionState = .closed
+    CE->>CE: releaseMetalResources()<br/>// readbackBuffers freed
+    CE->>CE: session.stopRunning()
+    CE-->>VM: return
+    deactivate CE
+
+    Note over GPU: GPU is still executing frame N
+
+    GPU->>CH: command buffer complete (async)
+    CH->>CE: Task { await onFrameReadbackComplete(readIndex, expectedState: .streaming) }
+
+    activate CE
+    CE->>CE: guard sessionState == expectedState<br/>sessionState == .closed<br/>expectedState == .streaming<br/>⇒ guard FAILS
+    CE->>CE: return (frame dropped)
+    Note right of CE: The readback buffer for this frame was freed<br/>in releaseMetalResources(). Touching<br/>.contents() would crash. The state guard<br/>prevents this by detecting that the actor<br/>re-entered from a different sessionState<br/>than the commit captured.
+    deactivate CE

@@ -1,0 +1,29 @@
+flowchart TB
+    User([User])
+
+    subgraph App["CamPlugin (this project)"]
+        direction TB
+        Core["Swift app<br/>CameraEngine · actors<br/>Metal pipeline · C++ consumers"]
+    end
+
+    User -->|taps, gestures,<br/>scene transitions| App
+    App -->|preview, edges,<br/>capture banner| User
+
+    App -->|configure session<br/>receive sample buffers<br/>capturePhoto| AVF[AVFoundation]
+    App -->|MTLDevice, command queue<br/>compute + blit passes| Metal[Metal]
+    App -->|texture cache<br/>IOSurface wrapping| TC[CoreVideo<br/>CVMetalTextureCache]
+    App -->|append pixel buffers| VT[VideoToolbox<br/>HEVC / H.264]
+    App -->|CGImageDestination<br/>EXIF properties dict| IO[ImageIO / CoreGraphics]
+    App -->|addOnly authorization<br/>performChanges| Photos[Photos<br/>PHPhotoLibrary]
+    App -->|thermalState notification<br/>systemPressureState KVO| Foundation[Foundation<br/>ProcessInfo]
+    App -->|beginBackgroundTask<br/>for recording drain| UIKit[UIKit<br/>UIApplication]
+    App -->|scenePhase, lifecycle| SwiftUI[SwiftUI]
+    App -->|edge detection on<br/>tracker 480px stream| OpenCV[OpenCV 4<br/>xcframework]
+
+    AVF -.->|opens| Camera[Back-facing main lens<br/>single physical camera]
+    Metal <-->|IOSurface<br/>zero-copy| VT
+
+    classDef ext fill:#eef,stroke:#88a,color:#000
+    classDef hw fill:#fed,stroke:#a85,color:#000
+    class AVF,Metal,TC,VT,IO,Photos,Foundation,UIKit,SwiftUI,OpenCV ext
+    class Camera,User hw

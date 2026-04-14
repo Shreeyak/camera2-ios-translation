@@ -1,0 +1,37 @@
+sequenceDiagram
+    autonumber
+    participant VM as CameraViewModel
+    participant SC as StillCaptureController<br/>(actor)
+    participant APO as AVCapturePhotoOutput
+    participant EX as EXIFWriter
+    participant FS as FileSystem
+
+    Note over VM,SC: First capture call arrives
+
+    VM->>SC: await captureNaturalPicture()
+    activate SC
+    SC->>SC: guard !captureInFlight else throw INVALID_STATE
+    Note right of SC: This check + the set on the next line<br/>both run synchronously before any<br/>await — they are atomic by actor<br/>construction.
+    SC->>SC: captureInFlight = true
+    SC->>SC: defer { captureInFlight = false }
+    SC->>APO: capturePhoto(with: settings, delegate: self)
+    Note right of SC: Await suspension here —<br/>actor is free to service other messages
+
+    Note over VM,SC: Second capture call arrives — actor is free
+
+    VM->>SC: await captureNaturalPicture()  [concurrent]
+    SC->>SC: guard !captureInFlight<br/>captureInFlight == true ⇒ throw
+    SC-->>VM: throw CameraError(.invalidState)
+
+    Note over VM,APO: First capture's photo delivery resumes
+
+    APO->>SC: didFinishProcessingPhoto (delegate)
+    SC->>SC: receive AVCapturePhoto
+    SC->>EX: buildEXIFProperties(sensor metadata)
+    EX-->>SC: CFDictionary of EXIF tags
+    SC->>FS: write JPEG to temp URL
+    SC->>EX: CGImageDestinationAddImageFromSource<br/>with EXIF dict
+    FS-->>SC: path
+    SC-->>VM: return path
+    Note right of SC: defer block fires on return:<br/>captureInFlight = false
+    deactivate SC

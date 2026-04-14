@@ -21,6 +21,9 @@ The GPU pipeline uses Metal compute shaders with `CVMetalTextureCache` zero-copy
 | `06-decisions-log.md` | 15 significant design decisions with alternatives considered and reversibility |
 | `07-ios-specific-risks.md` | 20 risk entries; domain error-case → iOS handling mapping table; domain/11 "not to port" confirmation table; NEEDS INVESTIGATION items |
 | `08-audit-lookups.md` | No audit lookups required — all requirements satisfied from domain/ |
+| `09-architecture-diagrams.md` | Mermaid reference companion: 5 architecture/flow diagrams + 5 sequence diagrams covering the hot path, consumer fan-out, GPU-to-encoder zero-copy, actor re-entrancy guard (F-01), and still-capture in-flight guard. Canonical visual reference for both humans and LLM agents. |
+| `diagrams/` | Pre-rendered Mermaid sidecars — 10 `.mmd` sources + 10 `.png` files. Includes `render.sh` to regenerate. |
+| `diagrams-d2/` | Parallel [D2](https://d2lang.com/) authoring of the same 10 diagrams — 10 `.d2` sources + `.svg` (native, 36–52 KB) + `.png` (pre-rendered, 450 KB–1.3 MB). Includes `render.sh`. D2's ELK layout engine produces cleaner layouts for dense architecture flowcharts; use this set for slide decks and wiki embeds. |
 
 ---
 
@@ -34,6 +37,7 @@ The GPU pipeline uses Metal compute shaders with `CVMetalTextureCache` zero-copy
 6. **`05-implementation-phases.md`** — implementation order; start with Phase 1a file tree
 7. **`06-decisions-log.md`** — read when a decision seems questionable; alternatives are documented
 8. **`07-ios-specific-risks.md`** — check the NEEDS INVESTIGATION items before starting Phase 1b and Phase 5
+9. **`09-architecture-diagrams.md`** — visual companion; use alongside 01–04 and whenever you need to see the data-flow / sequence structure at a glance
 
 ---
 

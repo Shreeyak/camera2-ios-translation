@@ -1,0 +1,61 @@
+# 08 — GPU-to-encoder zero-copy recording
+# IOSurface never touches the CPU. Verification point for F-03 patch.
+# Cross-ref: design/03-metal-pipeline.md §GPU-to-Encoder Path, design/06-decisions-log.md D-03
+
+shape: sequence_diagram
+
+CE: CameraEngine actor
+VR: VideoRecorder actor
+Pool: "CVPixelBufferPool\n(IOSurface-backed)"
+TC: "CVMetalTextureCache\n(recorder cache)"
+CB: "MTLCommandBuffer\n(shared with other blits)"
+BE: MTLBlitCommandEncoder
+GPU: GPU
+Adaptor: "AVAssetWriterInput\nPixelBufferAdaptor"
+VT: VideoToolbox
+
+Frame N — recording active: {
+  CE -> VR: is recording?
+  VR -> CE: true (cached actor-isolated state)
+}
+
+Dequeue IOSurface-backed pixel buffer: {
+  CE -> Pool: CVPixelBufferPoolCreatePixelBuffer
+  pool has buffer: {
+    Pool -> CE: "CVPixelBuffer (IOSurface-backed, BGRA)"
+  }
+  pool exhausted — thermal backlog: {
+    Pool -> CE: kCVReturnWouldBlock
+    CE -> CE: "droppedRecorderFrameCount += 1\n(preview pipeline unaffected)"
+  }
+}
+
+Wrap as MTLTexture (zero-copy): {
+  CE -> TC: CVMetalTextureCacheCreateTextureFromImage
+  TC -> CE: CVMetalTexture wrapping same IOSurface
+  CE -> CE: "CVMetalTextureGetTexture → encoderTexture"
+  CE -> CE: "guard encoderTexture != nil (R-24)"
+}
+
+GPU-local blit — stays in IOSurface memory: {
+  CE -> CB: makeBlitCommandEncoder
+  CB -> BE: encoder
+  CE -> BE: "copy(from: processedTexture, to: encoderTexture)"
+  CE -> BE: endEncoding
+  CE -> CB: addCompletedHandler
+  CE -> CB: commit
+}
+
+Execute and append: {
+  CB -> GPU: submit
+  GPU -> GPU: execute all blits (preview, tracker, encoder)
+  GPU -> CB: complete
+  CB -> CE: addCompletedHandler fires
+  CE -> VR: "Task { await appendRecordedFrame(pixelBuffer, pts) }"
+  VR -> VR: "guard recordingState == .recording"
+  VR -> Adaptor: "append(pixelBuffer, withPresentationTime: pts)"
+  Adaptor -> VT: "submit IOSurface handle\n(no copy — same memory)"
+  VT -> VT: "HEVC / H.264 compress\n(reads IOSurface directly)"
+  VT -> Adaptor: encoded frame written to file
+  Adaptor -> Pool: return CVPixelBuffer to pool
+}

@@ -1,0 +1,53 @@
+flowchart TB
+    HW[Back-main camera sensor]
+
+    subgraph CaptureLayer["AVCaptureSession"]
+        direction TB
+        AVOut[AVCaptureVideoDataOutput]
+        AVPhoto[AVCapturePhotoOutput]
+    end
+
+    HW --> AVOut
+    HW --> AVPhoto
+
+    AVOut -->|CVPixelBuffer<br/>YpCbCr 4:2:0 BiPlanar<br/>~4000x3000| CD[CaptureDelegate]
+    CD -->|IncomingFrame| CE[CameraEngine.processFrame]
+
+    subgraph EngineWork["CameraEngine actor — per frame work"]
+        direction TB
+        CE --> Wrap[CVMetalTextureCache wrap]
+        Wrap -->|R8Unorm<br/>Y plane texture| Compute
+        Wrap -->|RG8Unorm<br/>CbCr plane texture| Compute
+        Compute[Metal compute kernel<br/>YCbCr -> BGRA<br/>5-stage color pipeline]
+    end
+
+    Compute -->|BGRA8Unorm<br/>full res| Proc[processedTexture]
+    Compute -->|BGRA8Unorm<br/>full res, passthrough| Nat[naturalTexture]
+    Compute -->|BGRA8Unorm<br/>480px height| Trk[trackerTexture]
+    Compute -.->|BGRA8Unorm<br/>only while recording| EncT[encoderTexture<br/>from IOSurface pool]
+
+    Proc -->|OSAllocatedUnfairLock<br/>publish| PSlot[processedTextureSlot]
+    Nat -->|OSAllocatedUnfairLock<br/>publish| NSlot[naturalTextureSlot]
+
+    Proc -->|blit| RB[readbackBuffer 0 / 1<br/>double-buffered]
+    Trk -->|blit| TRB[trackerReadbackBuffer]
+
+    PSlot --> MR[MetalRenderer.draw]
+    NSlot --> NMR[NaturalMetalRenderer.draw]
+
+    MR -->|present| Disp1[MTKView<br/>processed preview]
+    NMR -->|present| Disp2[MTKView<br/>natural preview]
+
+    TRB -->|wrap FramePacket<br/>CPU-visible pixels| CR[ConsumerRegistry<br/>dispatch tracker role]
+    CR -.->|AsyncStream<br/>bufferingNewest 1| EDC[EdgeDetectionConsumer<br/>cv::Canny]
+
+    EncT -.->|GPU-local blit<br/>stays in IOSurface| Pool[CVPixelBufferPool]
+    Pool -.->|adaptor.append| AW[AVAssetWriterInput<br/>PixelBufferAdaptor]
+    AW -.->|same IOSurface| VT[VideoToolbox encoder]
+
+    classDef display fill:#efe,stroke:#6a6,color:#000
+    classDef record fill:#fee,stroke:#a66,color:#000
+    classDef consume fill:#eef,stroke:#66a,color:#000
+    class Disp1,Disp2,MR,NMR,PSlot,NSlot display
+    class EncT,Pool,AW,VT record
+    class EDC,CR,TRB consume

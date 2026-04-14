@@ -1,0 +1,42 @@
+# 09 — Actor re-entrancy guard (F-01)
+# close() arrives between commit and completion handler — state guard drops stale frame.
+# Cross-ref: design/03-metal-pipeline.md §onFrameReadbackComplete, review/02-adversarial-red-team.md F-01
+
+shape: sequence_diagram
+
+VM: CameraViewModel
+CE: CameraEngine actor
+GPU: Metal GPU
+CH: "Completion handler\n(Metal internal thread)"
+
+Actor is busy — processFrame(N) in flight: {
+  VM -> CE: "await close()\n(queued in mailbox)"
+}
+
+processFrame(N) — commit phase: {
+  CE -> CE: encode command buffer
+  CE -> CE: "frameSessionState = sessionState\n// captured as .streaming"
+  CE -> CE: "addCompletedHandler { cb in\n  if cb.status == .error { ... return }\n  Task { await onFrameReadbackComplete(\n    readIndex: i,\n    expectedState: .streaming)\n  }\n}"
+  CE -> CE: commandBuffer.commit()
+  CE -> CE: writeIndex = 1 - writeIndex
+  CE -> CE: "processFrame(N) returns"
+}
+
+close() runs (mailbox pumps): {
+  CE -> CE: "gpuStallWatchdogTask.cancel()"
+  CE -> CE: "retryTask?.cancel()"
+  CE -> CE: "sessionState = .closed"
+  CE -> CE: "releaseMetalResources()\n// readbackBuffers freed"
+  CE -> CE: session.stopRunning()
+  CE -> VM: return
+}
+
+GPU is still executing frame N: {
+  GPU -> CH: command buffer complete (async)
+  CH -> CE: "Task { await onFrameReadbackComplete(readIndex, expectedState: .streaming) }"
+}
+
+Guard catches state mismatch — frame dropped: {
+  CE -> CE: "guard sessionState == expectedState\nsessionState == .closed\nexpectedState == .streaming\n⇒ guard FAILS"
+  CE -> CE: "return — frame dropped\n(readback buffer was freed)"
+}

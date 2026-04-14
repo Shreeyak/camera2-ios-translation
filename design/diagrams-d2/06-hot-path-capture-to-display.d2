@@ -1,0 +1,55 @@
+# 06 — Hot path: capture → display
+# The 33ms-budget per-frame sequence.
+# Cross-ref: design/03-metal-pipeline.md §Frame Budget
+
+shape: sequence_diagram
+
+HW: Camera HW
+AVF: AVCaptureSession
+CDQ: "captureQueue\n(serial)"
+CD: "CaptureDelegate\n(nonisolated)"
+CE: "CameraEngine\n(actor)"
+MTLQ: MTLCommandQueue
+GPU: GPU
+Lock: "textureSlot\n(OSAllocatedUnfairLock)"
+MR: "MetalRenderer\n(nonisolated)"
+MTK: MTKView
+
+HW -> AVF: "sensor frame (~33ms cadence)"
+AVF -> CDQ: dispatch didOutput sampleBuffer
+CDQ -> CD: "captureOutput(_:didOutput:from:)"
+CD -> CD: "CMSampleBufferGetImageBuffer → CVPixelBuffer"
+CD -> CD: wrap as IncomingFrame (Sendable)
+CD -> CE: "Task { await processFrame(packet) }"
+
+CE -> CE: "CVMetalTextureCache wrap → Y + CbCr"
+CE -> MTLQ: makeCommandBuffer
+CE -> MTLQ: encode compute pass
+CE -> MTLQ: "encode blits — processed readback,\ntracker readback, encoder (if recording)"
+CE -> CE: frameSessionState = sessionState
+CE -> MTLQ: "addCompletedHandler { ... }"
+CE -> MTLQ: commit
+CE -> Lock: "withLock { slot = processedTexture }"
+CE -> MTK: "Task @MainActor { setNeedsDisplay() }"
+
+MTLQ -> GPU: submit
+
+GPU execution and MTKView redraw overlap: {
+  GPU -> GPU: run compute + blit
+  MTK -> MR: "draw(_:)"
+  MR -> Lock: "withLock { slot }"
+  Lock -> MR: MTLTexture reference
+  MR -> MTLQ: makeCommandBuffer
+  MR -> MTLQ: blit texture → currentDrawable
+  MR -> MTK: "commandBuffer.present(drawable)"
+  MR -> MTLQ: commit
+}
+
+GPU -> MTLQ: command buffer complete
+MTLQ -> CE: "addCompletedHandler fires\n(Metal internal thread)"
+
+CE -> CE: "if cb.status == .error → handleNonFatalError and return"
+CE -> CE: "Task { await onFrameReadbackComplete(readIndex, expectedState) }"
+CE -> CE: "guard sessionState == expectedState == .streaming"
+CE -> CE: "readbackBuffer[readIndex].contents() → FramePacket"
+CE -> CE: "await ConsumerRegistry.dispatch(frame, .tracker)"

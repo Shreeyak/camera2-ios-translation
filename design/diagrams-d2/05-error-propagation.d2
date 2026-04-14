@@ -1,0 +1,110 @@
+# 05 — Error propagation
+# All error sources, classifier, and downstream paths (fatal / non-fatal / suspend / drop-only).
+# Cross-ref: domain/06-error-and-recovery.md, design/02-concurrency.md §Invariant 9
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+direction: down
+
+classes: {
+  source: {
+    style.fill: "#f1f5f9"
+    style.stroke: "#475569"
+  }
+  classifier: {
+    style.fill: "#fef3c7"
+    style.stroke: "#b45309"
+    shape: diamond
+  }
+  fatal: {
+    style.fill: "#fee2e2"
+    style.stroke: "#b91c1c"
+  }
+  nonfatal: {
+    style.fill: "#fef9c3"
+    style.stroke: "#a16207"
+  }
+  suspended: {
+    style.fill: "#dbeafe"
+    style.stroke: "#1e40af"
+  }
+  dropped: {
+    style.fill: "#dcfce7"
+    style.stroke: "#15803d"
+  }
+  ui: {
+    style.fill: "#fae8ff"
+    style.stroke: "#86198f"
+  }
+}
+
+Sources: Error sources {
+  E1: "AVCaptureSessionRuntimeError\nnotification" { class: source }
+  E2: "Metal command buffer\ncb.status == .error" { class: source }
+  E3: "GPU stall watchdog\n(no completion for 3s)" { class: source }
+  E4: "Capture stall watchdog\n(no sample buffer for 5s)" { class: source }
+  E5: "HAL error counter ≥ 5\nconsecutive" { class: source }
+  E6: "Permission revoked mid-session\nAVError.mediaServicesWereReset" { class: source }
+  E7: "AVAssetWriter.status == .failed" { class: source }
+  E8: "thermalState == .critical" { class: source }
+  E9: "CVMetalTextureCache wrap\nreturned nil / memory pressure" { class: source }
+  E10: "CVPixelBufferPoolCreatePixelBuffer\nkCVReturnWouldBlock" { class: source }
+}
+
+Decide: "CameraEngine\nclassify error" {
+  class: classifier
+}
+
+FatalPath: handleFatalError { class: fatal }
+ST1: "sessionState = .error" { class: fatal }
+EmitF: "AsyncStream yield:\nonError(fatal=true)" { class: fatal }
+VM1: "CameraViewModel\nfatal error screen" { class: ui }
+
+NonFatalPath: handleNonFatalError { class: nonfatal }
+Check: "retryCount < 5?" { class: classifier }
+ST2: "sessionState = .recovering" { class: nonfatal }
+Emit2: "AsyncStream yield:\nonError(fatal=false)\n+ state change" { class: nonfatal }
+Sleep: "Task.sleep\n500ms · 1s · 2s · 4s · 8s" { class: nonfatal }
+Retry: doReopenCamera { class: nonfatal }
+Stream: "sessionState = .streaming" { class: nonfatal }
+
+SuspendPath: backgroundSuspend { class: suspended }
+ST3: "sessionState = .backgroundSuspended" { class: suspended }
+Release: "teardown Metal + session\n(keep process alive)" { class: suspended }
+Thermal: "wait for thermalState\n≤ .fair" { class: suspended }
+Resume: "backgroundResume\n→ .opening" { class: suspended }
+
+DropOnly: "increment\ndroppedFrameCount" { class: dropped }
+Continue: "continue — no state change" { class: dropped }
+
+Sources.E1 -> Decide
+Sources.E2 -> Decide
+Sources.E3 -> Decide
+Sources.E4 -> Decide
+Sources.E5 -> Decide
+Sources.E7 -> Decide
+Sources.E6 -> FatalPath
+Sources.E8 -> SuspendPath
+Sources.E9 -> DropOnly
+Sources.E10 -> DropOnly
+
+Decide -> FatalPath: "fatal\n(terminal)"
+Decide -> NonFatalPath: "non-fatal\n(recoverable)"
+
+FatalPath -> ST1 -> EmitF -> VM1
+
+NonFatalPath -> Check
+Check -> ST2: yes
+Check -> FatalPath: "no (max retries)"
+ST2 -> Emit2 -> Sleep -> Retry
+Retry -> Stream: success
+Retry -> NonFatalPath: failure
+
+SuspendPath -> ST3 -> Release -> Thermal -> Resume
+
+DropOnly -> Continue

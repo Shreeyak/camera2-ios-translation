@@ -1,0 +1,76 @@
+# 01 — System context
+# CamPlugin app boundary vs iOS system services + OpenCV.
+# Cross-ref: design/01-architecture.md §System Overview
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+direction: down
+
+classes: {
+  external: {
+    style.fill: "#eef2ff"
+    style.stroke: "#4f46e5"
+    style.stroke-width: 1
+  }
+  app: {
+    style.fill: "#fefce8"
+    style.stroke: "#ca8a04"
+    style.stroke-width: 2
+    style.bold: true
+  }
+  hw: {
+    style.fill: "#fff7ed"
+    style.stroke: "#c2410c"
+  }
+}
+
+user: User {
+  shape: person
+}
+
+app: "CamPlugin (this project)" {
+  class: app
+  core: "Swift app\nCameraEngine · actors\nMetal pipeline · C++ consumers"
+}
+
+avf: AVFoundation { class: external }
+metal: Metal { class: external }
+cv: "CoreVideo\nCVMetalTextureCache" { class: external }
+vt: "VideoToolbox\nHEVC / H.264" { class: external }
+io: "ImageIO\nCoreGraphics" { class: external }
+photos: "Photos\nPHPhotoLibrary" { class: external }
+foundation: "Foundation\nProcessInfo" { class: external }
+uikit: "UIKit\nUIApplication" { class: external }
+swiftui: SwiftUI { class: external }
+opencv: "OpenCV 4\nxcframework" { class: external }
+
+camera: "Back-facing\nmain lens" {
+  class: hw
+}
+
+user -> app: "taps, gestures,\nscene transitions"
+app -> user: "preview, edges,\ncapture banner"
+
+app -> avf: "configure session\nreceive sample buffers"
+app -> metal: "encode compute\nblit, present"
+app -> cv: "IOSurface wrapping\nzero-copy"
+app -> vt: append frames
+app -> io: "CGImageDestination\nEXIF dict"
+app -> photos: "addOnly authorization\nperformChanges"
+app -> foundation: "thermalState\nsystemPressureState KVO"
+app -> uikit: "beginBackgroundTask\n(recording drain)"
+app -> swiftui: scenePhase
+app -> opencv: "edge detection\n(tracker 480px)"
+
+avf -> camera: opens {
+  style.stroke-dash: 3
+}
+metal <-> vt: "IOSurface\nzero-copy" {
+  style.stroke: "#059669"
+  style.stroke-width: 2
+}

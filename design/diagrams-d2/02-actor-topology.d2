@@ -1,0 +1,100 @@
+# 02 — Actor topology
+# Swift actors and their message channels.
+# Cross-ref: design/02-concurrency.md §Isolation Taxonomy
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+direction: down
+
+classes: {
+  main: {
+    style.fill: "#fefce8"
+    style.stroke: "#ca8a04"
+  }
+  actor: {
+    style.fill: "#eef2ff"
+    style.stroke: "#4f46e5"
+  }
+  noniso: {
+    style.fill: "#fee2e2"
+    style.stroke: "#b91c1c"
+  }
+  cpp: {
+    style.fill: "#dcfce7"
+    style.stroke: "#15803d"
+  }
+  mlproc: {
+    style.fill: "#fae8ff"
+    style.stroke: "#86198f"
+  }
+}
+
+MainIso: "@MainActor — UI thread" {
+  class: main
+  VM: "CameraViewModel\n@Observable" { class: main }
+  UI: SwiftUI Views { class: main }
+  VM -> UI: binds to
+}
+
+Nonisolated: nonisolated — system-driven {
+  class: noniso
+  CD: "CaptureDelegate\nAVFoundation delegate" { class: noniso }
+  MR: "MetalRenderer\nMTKViewDelegate" { class: noniso }
+  NMR: "NaturalMetalRenderer\nMTKViewDelegate" { class: noniso }
+}
+
+Engine: CameraEngine actor {
+  class: actor
+  CE: "session state\nMetal pipeline\nstall watchdogs\nrecovery state machine" { class: actor }
+}
+
+Support: Support actors {
+  class: actor
+  CR: "ConsumerRegistry\nactor" { class: actor }
+  SC: "StillCaptureController\nactor" { class: actor }
+  VR: "VideoRecorder\nactor" { class: actor }
+}
+
+ML: "@MLProcessor — global actor" {
+  class: mlproc
+  MLP: "edge result coalescing\noverlay state" { class: mlproc }
+}
+
+Cpp: C++ consumers {
+  class: cpp
+  EDC: "EdgeDetectionConsumer\nown DispatchQueue" { class: cpp }
+}
+
+# Synchronous actor-to-actor awaits (solid)
+MainIso.VM -> Engine.CE: "await open / close\nawait setProcessingParameters"
+MainIso.VM -> Support.SC: "await captureNaturalPicture\nawait captureImage"
+MainIso.VM -> Support.VR: "await startRecording\nawait stopRecording"
+
+Nonisolated.CD -> Engine.CE: "IncomingFrame\n(Sendable wrapper)"
+
+Engine.CE -> Nonisolated.MR: "OSAllocatedUnfairLock\npublish texture"
+Engine.CE -> Nonisolated.NMR: "OSAllocatedUnfairLock\npublish texture"
+
+Engine.CE -> Support.CR: "await dispatch\n(FramePacket)"
+Engine.CE -> Support.VR: "await append\nrecorded frame"
+Support.SC -> Engine.CE: "await session access"
+Support.VR -> Engine.CE: "await session access"
+
+# Async delivery (dashed)
+Engine.CE -> MainIso.VM: "AsyncStream:\nonStateChanged · onError · onFrameResult" {
+  style.stroke-dash: 3
+}
+Support.CR -> Cpp.EDC: "AsyncStream\nbufferingNewest(1)" {
+  style.stroke-dash: 3
+}
+Cpp.EDC -> ML.MLP: "EdgeDetectionResult\n(Sendable)" {
+  style.stroke-dash: 3
+}
+ML.MLP -> MainIso.VM: AsyncStream {
+  style.stroke-dash: 3
+}

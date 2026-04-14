@@ -1,0 +1,61 @@
+flowchart TB
+    subgraph MainIso["@MainActor — UI thread"]
+        VM["CameraViewModel<br/>@Observable"]
+        UI[SwiftUI Views]
+        VM -->|binds to| UI
+    end
+
+    subgraph Nonisolated["nonisolated — system-driven"]
+        CD[CaptureDelegate<br/>AVFoundation sample buffer delegate]
+        MR[MetalRenderer<br/>MTKViewDelegate]
+        NMR[NaturalMetalRenderer<br/>MTKViewDelegate]
+    end
+
+    subgraph Engine["CameraEngine actor"]
+        CE[session state<br/>Metal pipeline<br/>stall watchdogs<br/>recovery state machine]
+    end
+
+    subgraph Support["Support actors"]
+        CR[ConsumerRegistry<br/>actor]
+        SC[StillCaptureController<br/>actor]
+        VR[VideoRecorder<br/>actor]
+    end
+
+    subgraph ML["@MLProcessor — global actor"]
+        MLP[edge result coalescing<br/>overlay state]
+    end
+
+    subgraph Cpp["C++ consumers"]
+        EDC[EdgeDetectionConsumer<br/>own DispatchQueue]
+    end
+
+    VM -->|await open / close<br/>await setResolution<br/>await setProcessingParameters| CE
+    VM -->|await captureNaturalPicture<br/>await captureImage| SC
+    VM -->|await startRecording<br/>await stopRecording| VR
+
+    CE -.->|AsyncStream:<br/>onStateChanged<br/>onError<br/>onFrameResult| VM
+
+    CD -->|"IncomingFrame<br/>@unchecked Sendable wrapper"| CE
+
+    CE -->|OSAllocatedUnfairLock<br/>withLock publish| MR
+    CE -->|OSAllocatedUnfairLock<br/>withLock publish| NMR
+    MR -->|Task MainActor<br/>setNeedsDisplay| MR
+    NMR -->|Task MainActor<br/>setNeedsDisplay| NMR
+
+    CE -->|await dispatch<br/>FramePacket| CR
+    CR -.->|AsyncStream<br/>bufferingNewest 1| EDC
+    EDC -.->|EdgeDetectionResult<br/>Sendable| MLP
+    MLP -.->|AsyncStream| VM
+
+    CE -->|await append<br/>recording frame| VR
+    SC -->|await session access<br/>AVCapturePhotoOutput| CE
+    VR -->|await session access| CE
+
+    classDef main fill:#ffe,stroke:#aa6,color:#000
+    classDef actor fill:#eef,stroke:#66a,color:#000
+    classDef noniso fill:#fee,stroke:#a66,color:#000
+    classDef cpp fill:#efe,stroke:#6a6,color:#000
+    class VM,UI main
+    class CE,CR,SC,VR,MLP actor
+    class CD,MR,NMR noniso
+    class EDC cpp

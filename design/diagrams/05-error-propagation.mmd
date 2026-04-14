@@ -1,0 +1,61 @@
+flowchart TB
+    subgraph Sources["Error sources"]
+        E1[AVCaptureSessionRuntimeError<br/>notification]
+        E2[Metal command buffer<br/>cb.status == .error]
+        E3[GPU stall watchdog<br/>no completion for 3s]
+        E4[Capture stall watchdog<br/>no sample buffer for 5s]
+        E5[HAL error counter >= 5<br/>consecutive]
+        E6[Permission revoked mid-session<br/>AVError.mediaServicesWereReset]
+        E7[AVAssetWriter.status == .failed]
+        E8[ProcessInfo.thermalState == .critical]
+        E9[CVMetalTextureCache wrap<br/>returned nil / memory pressure]
+        E10[CVPixelBufferPoolCreatePixelBuffer<br/>kCVReturnWouldBlock]
+    end
+
+    subgraph Classifier["CameraEngine error classifier"]
+        Decide{classify}
+    end
+
+    E1 --> Decide
+    E2 --> Decide
+    E3 --> Decide
+    E4 --> Decide
+    E5 --> Decide
+    E6 --> FatalPath
+    E7 --> Decide
+    E8 --> SuspendPath
+    E9 --> NonFatalPath
+    E10 --> DropOnly
+
+    Decide -->|fatal<br/>terminal| FatalPath[handleFatalError]
+    Decide -->|non-fatal<br/>recoverable| NonFatalPath[handleNonFatalError]
+
+    FatalPath --> ST1[sessionState = .error]
+    ST1 --> EmitF[AsyncStream yield:<br/>onError fatal=true]
+    EmitF --> VM1[CameraViewModel<br/>UI shows fatal error screen]
+
+    NonFatalPath --> Check{retryCount < 5?}
+    Check -->|yes| ST2[sessionState = .recovering]
+    ST2 --> Emit2[AsyncStream yield:<br/>onError fatal=false<br/>+ state change]
+    Emit2 --> Sleep[Task.sleep<br/>500ms · 1s · 2s · 4s · 8s]
+    Sleep --> Retry[doReopenCamera]
+    Retry -->|success| Stream[sessionState = .streaming]
+    Retry -->|failure| NonFatalPath
+    Check -->|no max retries| FatalPath
+
+    SuspendPath --> ST3[sessionState = .backgroundSuspended]
+    ST3 --> Release[teardown Metal + session<br/>keep process alive]
+    Release --> Thermal[wait for thermalState<br/><= .fair]
+    Thermal --> Resume[backgroundResume<br/>-> .opening]
+
+    DropOnly --> Counter[increment<br/>droppedRecorderFrameCount]
+    Counter --> Continue[continue — no state change]
+
+    classDef fatal fill:#fcc,stroke:#a33,color:#000
+    classDef nonfatal fill:#ffc,stroke:#a83,color:#000
+    classDef suspend fill:#ccf,stroke:#33a,color:#000
+    classDef drop fill:#cfc,stroke:#3a3,color:#000
+    class FatalPath,ST1,EmitF,VM1 fatal
+    class NonFatalPath,ST2,Emit2,Sleep,Retry,Stream nonfatal
+    class SuspendPath,ST3,Release,Thermal,Resume suspend
+    class DropOnly,Counter,Continue drop

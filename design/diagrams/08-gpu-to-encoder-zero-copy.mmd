@@ -1,0 +1,53 @@
+sequenceDiagram
+    autonumber
+    participant CE as CameraEngine actor
+    participant VR as VideoRecorder actor
+    participant Pool as CVPixelBufferPool<br/>(IOSurface-backed)
+    participant TC as CVMetalTextureCache<br/>(recorder cache)
+    participant CB as MTLCommandBuffer<br/>(shared with other blits)
+    participant BE as MTLBlitCommandEncoder
+    participant GPU as GPU
+    participant Adaptor as AVAssetWriterInput<br/>PixelBufferAdaptor
+    participant VT as VideoToolbox
+
+    Note over CE,VT: Frame N — recording is active
+    CE->>VR: is recording?
+    VR-->>CE: true (cached actor-isolated state)
+
+    CE->>Pool: CVPixelBufferPoolCreatePixelBuffer
+    alt pool has buffer
+        Pool-->>CE: CVPixelBuffer (IOSurface-backed, BGRA)
+    else pool exhausted (thermal backlog)
+        Pool-->>CE: kCVReturnWouldBlock
+        CE->>CE: droppedRecorderFrameCount += 1
+        Note right of CE: Recording drops this frame —<br/>preview pipeline unaffected
+    end
+
+    CE->>TC: CVMetalTextureCacheCreateTextureFromImage(pixelBuffer)
+    TC-->>CE: CVMetalTexture wrapping same IOSurface
+    CE->>CE: CVMetalTextureGetTexture → encoderTexture (MTLTexture)
+    CE->>CE: guard encoderTexture != nil (R-24)
+
+    CE->>CB: makeBlitCommandEncoder
+    CB-->>BE: encoder
+    CE->>BE: copy(from: processedTexture, to: encoderTexture)
+    Note right of BE: GPU-local blit — pixel data stays<br/>in IOSurface memory. CPU never touches bytes.
+    CE->>BE: endEncoding()
+    CE->>CB: addCompletedHandler
+    CE->>CB: commit
+
+    CB->>GPU: submit
+    GPU->>GPU: execute all blits (preview, tracker, encoder)
+    GPU-->>CB: complete
+    CB->>CE: addCompletedHandler fires
+    CE->>VR: Task { await appendRecordedFrame(pixelBuffer, pts) }
+
+    activate VR
+    VR->>VR: guard recordingState == .recording<br/>(actor guard — prevents append after stop)
+    VR->>Adaptor: append(pixelBuffer, withPresentationTime: pts)
+    Note right of Adaptor: append does NOT copy —<br/>VideoToolbox reads the same IOSurface
+    Adaptor->>VT: submit IOSurface handle
+    VT->>VT: HEVC / H.264 compress<br/>(reads IOSurface directly)
+    VT-->>Adaptor: encoded frame written to file
+    Adaptor->>Pool: return CVPixelBuffer to pool
+    deactivate VR
