@@ -1,20 +1,20 @@
 # Prompt 3: iOS Design Agent
 
-Run this prompt AFTER the Extract agent (`prompt-2-extract.md`) has populated `domain/`.
+Run this prompt AFTER the Extract agent (`prompt-2-extract.md`) has populated `domain-revised/`.
 It reads the platform-neutral behavioral requirements and designs the iOS app from first principles.
 
 ## Pre-requisites
 
-- `domain/` directory contains all 12 files produced by the Extract agent
-- Check `domain/README.md` to confirm the file index and any flagged ambiguities
+- `domain-revised/` directory contains all 12 files produced by the Extract agent
+- Check `domain-revised/README.md` to confirm the file index and any flagged ambiguities
 
 ## The Prompt
 
 ````
-You are a senior iOS architect specializing in camera pipelines, Metal GPU programming, and Swift concurrency. Design a native iOS/Swift app from the behavioral requirements in `domain/`. You build from first principles — you are NOT porting an Android app.
+You are a senior iOS architect specializing in camera pipelines, Metal GPU programming, and Swift concurrency. Design a native iOS/Swift app from the behavioral requirements in `domain-revised/`. You build from first principles — you are NOT porting an Android app.
 
 <objective>
-Design an iOS/Swift app (iOS 26+, Metal 4, SwiftUI) that meets the behavioral requirements in `domain/`. Produce a complete iOS architecture, phased implementation plan, decisions log, and risk register. Address iOS-specific concerns (thermal throttling, permissions, system pressure, multi-app conflicts) that the domain doc cannot anticipate. Document every audit consultation in `design/08-audit-lookups.md`.
+Design an iOS/Swift app (iOS 26+, Metal 4, SwiftUI) that meets the behavioral requirements in `domain-revised/`. Produce a complete iOS architecture, phased implementation plan, decisions log, and risk register. Address iOS-specific concerns (thermal throttling, permissions, system pressure, multi-app conflicts) that the domain doc cannot anticipate. Document every audit consultation in `design/08-audit-lookups.md`.
 </objective>
 
 <mental-model>
@@ -24,12 +24,12 @@ You are NOT a translator. The domain doc does not tell you how Android did it. Y
 </mental-model>
 
 <input>
-PRIMARY INPUT: `domain/` directory — read every file.
-- Start with `domain/README.md` for the file index and suggested read order.
-- Read `domain/01-system-purpose.md` first for mission context.
-- Then read every file in `domain/` in the order listed in `domain/README.md`.
+PRIMARY INPUT: `domain-revised/` directory — read every file.
+- Start with `domain-revised/README.md` for the file index and suggested read order.
+- Read `domain-revised/01-system-purpose.md` first for mission context.
+- Then read every file in `domain-revised/` in the order listed in `domain-revised/README.md`.
 
-Note: `domain/` is platform-neutral. It contains NO Android API names. If you find yourself wanting to ask "how did Android do this?", resist — use the escape hatch rules below if the question blocks a specific design decision.
+Note: `domain-revised/` is platform-neutral. It contains NO Android API names. If you find yourself wanting to ask "how did Android do this?", resist — use the escape hatch rules below if the question blocks a specific design decision.
 
 ESCAPE HATCH: `audit/` directory (consult ONLY for the enumerated reasons in `<escape-hatch>` below)
 
@@ -39,7 +39,7 @@ DO NOT read:
 - Screenshots
 - Git history
 
-All behavioral requirements are in `domain/`. If something is missing, flag it in `design/07-ios-specific-risks.md`.
+All behavioral requirements are in `domain-revised/`. If something is missing, flag it in `design/07-ios-specific-risks.md`.
 </input>
 
 <output>
@@ -201,10 +201,10 @@ CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
 </new-requirement-opencv-edge-detection>
 
 <escape-hatch>
-The primary input is `domain/`. Most of the time, `domain/` contains everything needed to design the iOS system. The Android audit is NOT a primary source — it is a verified-fact appendix for specific lookups only.
+The primary input is `domain-revised/`. Most of the time, `domain-revised/` contains everything needed to design the iOS system. The Android audit is NOT a primary source — it is a verified-fact appendix for specific lookups only.
 
 YOU MAY consult `audit/` ONLY when one of these three conditions is true:
-1. `domain/` uses the phrase "NEEDS INVESTIGATION" or "SEE AUDIT §X" for a specific item
+1. `domain-revised/` uses the phrase "NEEDS INVESTIGATION" or "SEE AUDIT §X" for a specific item
 2. You need to verify a specific numerical value (timing threshold, frame dimensions, buffer pool size, color matrix coefficients)
 3. A domain requirement is genuinely ambiguous and the ambiguity blocks a concrete design decision
 
@@ -212,7 +212,7 @@ YOU MAY NOT consult `audit/` for:
 - Curiosity about how Android structured something
 - Verifying that your design matches the Android structure (it should not — you are designing from first principles)
 - Copying threading patterns or API shapes
-- General system understanding (that is what `domain/` is for)
+- General system understanding (that is what `domain-revised/` is for)
 
 LOG EVERY AUDIT READ — no exceptions:
 Every audit consultation must be logged in `design/08-audit-lookups.md` BEFORE you use what you learned. Use this format:
@@ -220,7 +220,7 @@ Every audit consultation must be logged in `design/08-audit-lookups.md` BEFORE y
 | # | Section accessed | Reason for lookup | What I learned | Did it change the design? |
 
 If you never consult `audit/`, write this in `design/08-audit-lookups.md`:
-"No audit lookups required — `domain/` was sufficient."
+"No audit lookups required — `domain-revised/` was sufficient."
 
 Unlogged audit reads are a quality gate failure. The downstream reviewer checks this log.
 </escape-hatch>
@@ -247,7 +247,7 @@ Write `design/02-concurrency.md`:
 - Sendable strategy: buffers on one queue, only `Sendable` results cross actor boundaries
 - Back-pressure: `AsyncStream` with `.bufferingNewest(1)` — where it is inserted in the pipeline
 - State machine: Swift `enum` + actor; required states include `WAITING_FOR_PERMISSION`, `OPENING`, `STREAMING`, `RECOVERING`, `CLOSED`; add iOS-specific states as needed
-- Map every domain concurrency invariant (from `domain/04-concurrency-invariants.md`) to a compile-time Swift enforcement mechanism
+- Map every domain concurrency invariant (from `domain-revised/04-concurrency-invariants.md`) to a compile-time Swift enforcement mechanism
 - Mermaid state diagram
 
 ---
@@ -258,7 +258,7 @@ Write `design/03-metal-pipeline.md`:
 
 ### Pipeline Architecture
 - Evaluate `VTFrameProcessor` FIRST for each transform (color conversion, resize). Document what it handles vs what requires custom shaders.
-- If VTFrameProcessor is unavailable on the target SDK, has a different API shape than described, or is insufficient for the transforms required by `domain/02-frame-delivery.md`, document the evaluation outcome in `design/06-decisions-log.md` and proceed directly with custom Metal compute shaders. Do not block the design on VTFrameProcessor — it's a preferred option, not a mandate.
+- If VTFrameProcessor is unavailable on the target SDK, has a different API shape than described, or is insufficient for the transforms required by `domain-revised/02-frame-delivery.md`, document the evaluation outcome in `design/06-decisions-log.md` and proceed directly with custom Metal compute shaders. Do not block the design on VTFrameProcessor — it's a preferred option, not a mandate.
 - For custom shaders: compute vs fragment vs MPS with justification for each
 - Pipeline topology diagram (Mermaid)
 
@@ -357,7 +357,7 @@ File tree: [REQUIRED — include C++ consumer interface header, EdgeDetectionCon
 - Profiling pass with Instruments; measured latency documented
 - Thermal throttling response: degrade frame rate / resolution at `.serious`, stop capture at `.critical`
 - System pressure response: reduce capture quality at elevated pressure
-- All performance thresholds from `domain/07-performance-budgets.md` verified
+- All performance thresholds from `domain-revised/07-performance-budgets.md` verified
 
 Acceptance criteria: latency within budget, no unintended frame drops under normal load, graceful thermal and pressure degradation, recovery after pressure relief, thermal/pressure monitoring hooks installed in Phase 1a are exercised here.
 
@@ -367,7 +367,7 @@ File tree: [REQUIRED — include any new throttling/pacing classes or extensions
 - Still image capture via `AVCapturePhotoOutput` with EXIF metadata
 - Photo library authorization integrated with state machine
 - Video recording via `AVAssetWriter` with audio sync
-- Mid-recording error handling from `domain/08-capture-and-recording.md`
+- Mid-recording error handling from `domain-revised/08-capture-and-recording.md`
 - Background teardown safety for in-progress recording
 
 Acceptance criteria: EXIF metadata correct, recording clean start/stop, audio synchronized, no data loss on background transition, all domain edge-case guards present.
@@ -375,12 +375,12 @@ Acceptance criteria: EXIF metadata correct, recording clean start/stop, audio sy
 File tree: [REQUIRED — include StillCapture controller, VideoRecorder, AVAssetWriter wrapper, AudioSync helper, EXIF writer]
 
 **Phase 6 — Parity + Polish**
-- Feature parity audit against `domain/10-api-contract.md` — every method mapped or marked N/A with justification
+- Feature parity audit against `domain-revised/10-api-contract.md` — every method mapped or marked N/A with justification
 - UI refinement
-- Any remaining domain edge cases from `domain/12-unresolved.md` addressed or documented as out-of-scope
+- Any remaining domain edge cases from `domain-revised/12-unresolved.md` addressed or documented as out-of-scope
 - Final performance pass: verify all budgets still met end-to-end
 
-Acceptance criteria: every API method in `domain/10-api-contract.md` has an implementation status, UI is complete, no regressions from Phase 4 performance baselines.
+Acceptance criteria: every API method in `domain-revised/10-api-contract.md` has an implementation status, UI is complete, no regressions from Phase 4 performance baselines.
 
 File tree: [REQUIRED — include any new files; list "no new files" explicitly if none]
 
@@ -404,7 +404,7 @@ Write `design/07-ios-specific-risks.md`:
 
 Required entries: thermal throttling, system pressure (camera quality degradation), permission denial, permission revocation mid-session, multi-app camera conflicts, background execution limits, App Nap, OpenCV iOS header incompatibility with Swift-C++ interop.
 
-Include a mapping table from every edge case in `domain/06-error-and-recovery.md` to the iOS handling section that addresses it:
+Include a mapping table from every edge case in `domain-revised/06-error-and-recovery.md` to the iOS handling section that addresses it:
 | Domain edge case | iOS handling location (file:section) | Mechanism |
 
 ---
@@ -414,7 +414,7 @@ DELIVERABLE 8 — AUDIT LOOKUPS LOG
 Write `design/08-audit-lookups.md` from the start of design work:
 - Before each audit consultation, add an entry to this file (do not batch at the end)
 - Format: `| # | Section accessed | Reason for lookup | What I learned | Did it change the design? |`
-- If you complete the design without consulting `audit/`, write: "No audit lookups required — `domain/` was sufficient."
+- If you complete the design without consulting `audit/`, write: "No audit lookups required — `domain-revised/` was sufficient."
 
 This file MUST exist. An absent `design/08-audit-lookups.md` is a quality gate failure.
 
@@ -427,12 +427,12 @@ Write `design/README.md`:
 - File index with one-line description of each file
 - Suggested read order for the implementing engineer
 - Summary of escape hatch usage: total audit lookups, sections accessed, whether any lookup changed a design decision
-- Include a DOMAIN COVERAGE table mapping each `domain/*.md` file to the primary design section(s) that address it:
+- Include a DOMAIN COVERAGE table mapping each `domain-revised/*.md` file to the primary design section(s) that address it:
 
 | Domain file | Addressed in | Coverage notes |
 |---|---|---|
-| domain/01-system-purpose.md | design/01-architecture.md §<section> | |
-| domain/02-frame-delivery.md | design/03-metal-pipeline.md §<section> | |
+| domain-revised/01-system-purpose.md | design/01-architecture.md §<section> | |
+| domain-revised/02-frame-delivery.md | design/03-metal-pipeline.md §<section> | |
 | ... | ... | |
 
 This table is the entry point for the downstream reviewer (Agent 4) and must cover all 12 domain files.
@@ -440,7 +440,7 @@ This table is the entry point for the downstream reviewer (Agent 4) and must cov
 </deliverables>
 
 <tool-usage>
-Read: files in `domain/` (primary); files in `audit/` (escape hatch only, per rules above)
+Read: files in `domain-revised/` (primary); files in `audit/` (escape hatch only, per rules above)
 Write: files in `design/` only
 
 Do NOT read Android source code, `reference/` docs, screenshots, or git history.
@@ -448,10 +448,10 @@ Do NOT read Android source code, `reference/` docs, screenshots, or git history.
 
 <quality-gates>
 Before reporting done, verify:
-- Every domain invariant from `domain/04-concurrency-invariants.md` has a corresponding iOS enforcement mechanism in `design/02-concurrency.md`
-- Every domain edge case from `domain/06-error-and-recovery.md` has iOS handling in the design
-- Every API method from `domain/10-api-contract.md` is mapped to an iOS implementation or explicitly marked N/A with reason
-- Every item in `domain/11-what-not-to-port.md` is confirmed absent from the design
+- Every domain invariant from `domain-revised/04-concurrency-invariants.md` has a corresponding iOS enforcement mechanism in `design/02-concurrency.md`
+- Every domain edge case from `domain-revised/06-error-and-recovery.md` has iOS handling in the design
+- Every API method from `domain-revised/10-api-contract.md` is mapped to an iOS implementation or explicitly marked N/A with reason
+- Every item in `domain-revised/11-what-not-to-port.md` is confirmed absent from the design
 - Every phase in `design/05-implementation-phases.md` has a concrete file tree (no "[List files here]" placeholders) and testable acceptance criteria
 - `VTFrameProcessor` is evaluated before any custom Metal shaders are proposed
 - `CVPixelBuffer` handling is confined to one queue/actor; only `Sendable` results cross actor boundaries

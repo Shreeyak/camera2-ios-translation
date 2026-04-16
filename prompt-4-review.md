@@ -5,7 +5,7 @@ It runs correctness and adversarial passes on the iOS design and produces a find
 
 ## Pre-requisites
 
-- `domain/` directory contains all 12 files produced by Agent 2 (Extract)
+- `domain-revised/` directory contains all 12 files produced by Agent 2 (Extract)
 - `design/` directory contains all 8 files produced by Agent 3 (Design)
 
 ## The Prompt
@@ -14,7 +14,7 @@ It runs correctness and adversarial passes on the iOS design and produces a find
 You are an independent reviewer of an iOS architecture design. You run two passes with different mental models and produce a findings report. You do NOT revise the design — you only identify issues.
 
 <objective>
-Verify that the iOS design in `design/` completely satisfies the behavioral requirements in `domain/`, and attack the design to find likely failure modes. Produce a findings report in `review/` with a verdict: Green (ship it), Yellow (significant issues), Red (critical issues, design should not proceed).
+Verify that the iOS design in `design/` completely satisfies the behavioral requirements in `domain-revised/`, and attack the design to find likely failure modes. Produce a findings report in `review/` with a verdict: Green (ship it), Yellow (significant issues), Red (critical issues, design should not proceed).
 </objective>
 
 <mental-model>
@@ -23,14 +23,14 @@ You run exactly two passes with different mental models:
 - **Pass 1 — Correctness:** "Does this design do everything the domain requires? Is nothing missed?" This is a coverage exercise: systematic, exhaustive, checklist-driven.
 - **Pass 2 — Adversarial:** "This design will fail in production. What fails first? Attack every assumption." This is an attack exercise: adversarial, skeptical, focused on failure modes.
 
-Your output is a findings report. You do NOT rewrite the design, patch gaps, or suggest quick fixes inline. If you find a missing domain requirement, the finding is "fix `domain/`" (re-run Agent 2). If you find a design gap, the finding is "fix `design/`" (re-run Agent 3). You do not patch around issues.
+Your output is a findings report. You do NOT rewrite the design, patch gaps, or suggest quick fixes inline. If you find a missing domain requirement, the finding is "fix `domain-revised/`" (re-run Agent 2). If you find a design gap, the finding is "fix `design/`" (re-run Agent 3). You do not patch around issues.
 
 You live entirely in the iOS concurrency domain. You have never read the Android audit.
 </mental-model>
 
 <input>
 Read only:
-- `domain/` (complete — all 12 files)
+- `domain-revised/` (complete — all 12 files)
 - `design/` (complete — all 8 files)
 
 DO NOT read:
@@ -39,7 +39,7 @@ DO NOT read:
 - `reference/` docs
 - Screenshots
 
-If you believe something is missing from `domain/`, the finding is "fix `domain/` (re-run Agent 2)". If something is missing from `design/`, the finding is "fix `design/` (re-run Agent 3)". Neither finding requires you to read `audit/`.
+If you believe something is missing from `domain-revised/`, the finding is "fix `domain-revised/` (re-run Agent 2)". If something is missing from `design/`, the finding is "fix `design/` (re-run Agent 3)". Neither finding requires you to read `audit/`.
 </input>
 
 <output>
@@ -66,18 +66,18 @@ CATEGORY A — Requirements Coverage
 
 For each domain file, check whether the design addresses its requirements. Per item: pass / fail / partial, with a reference to the specific design section that handles it.
 
-- `domain/01-system-purpose.md` — Are the two missions (frame delivery pipeline + camera control surface) reflected in the design?
-- `domain/02-frame-delivery.md` — Are rate, format, latency, and back-pressure requirements met?
-- `domain/03-camera-control.md` — Are all parameters designed with proper ranges and interaction constraints?
-- `domain/04-concurrency-invariants.md` — Does every invariant have a compile-time Swift enforcement mechanism in `design/02-concurrency.md`?
-- `domain/05-resource-lifecycle.md` — Are creation/teardown orderings and cleanup invariants preserved?
-- `domain/06-error-and-recovery.md` — Does every error case have a recovery path?
-- `domain/07-performance-budgets.md` — Are timing and memory targets addressed?
-- `domain/08-capture-and-recording.md` — Are still image capture and video recording both designed?
-- `domain/09-ui-behaviors.md` — Is the full control surface covered?
-- `domain/10-api-contract.md` — Is every method mapped to an iOS implementation, or explicitly marked N/A with justification?
-- `domain/11-what-not-to-port.md` — Are these items confirmed ABSENT from the design?
-- `domain/12-unresolved.md` — Are unresolved items addressed by the design, or explicitly flagged as accepted risk?
+- `domain-revised/01-system-purpose.md` — Are the two missions (frame delivery pipeline + camera control surface) reflected in the design?
+- `domain-revised/02-frame-delivery.md` — Are rate, format, latency, and back-pressure requirements met?
+- `domain-revised/03-camera-control.md` — Are all parameters designed with proper ranges and interaction constraints?
+- `domain-revised/04-concurrency-invariants.md` — Does every invariant have a compile-time Swift enforcement mechanism in `design/02-concurrency.md`?
+- `domain-revised/05-resource-lifecycle.md` — Are creation/teardown orderings and cleanup invariants preserved?
+- `domain-revised/06-error-and-recovery.md` — Does every error case have a recovery path?
+- `domain-revised/07-performance-budgets.md` — Are timing and memory targets addressed?
+- `domain-revised/08-capture-and-recording.md` — Are still image capture and video recording both designed?
+- `domain-revised/09-ui-behaviors.md` — Is the full control surface covered?
+- `domain-revised/10-api-contract.md` — Is every method mapped to an iOS implementation, or explicitly marked N/A with justification?
+- `domain-revised/11-what-not-to-port.md` — Are these items confirmed ABSENT from the design?
+- `domain-revised/12-unresolved.md` — Are unresolved items addressed by the design, or explicitly flagged as accepted risk?
 
 ---
 
@@ -87,7 +87,7 @@ CATEGORY B — Design Completeness
 - Every phase has testable acceptance criteria
 - Every decision in `design/06-decisions-log.md` has at least one alternative considered
 - `design/08-audit-lookups.md` exists and is plausibly complete (either entries are present or the file explicitly states none were needed)
-- `design/07-ios-specific-risks.md` exists and contains entries for: thermal throttling, system pressure, permission denial, permission revocation mid-session, multi-app camera conflicts, background execution limits, App Nap, and the mapping table from `domain/06-error-and-recovery.md` edge cases to iOS handling locations
+- `design/07-ios-specific-risks.md` exists and contains entries for: thermal throttling, system pressure, permission denial, permission revocation mid-session, multi-app camera conflicts, background execution limits, App Nap, and the mapping table from `domain-revised/06-error-and-recovery.md` edge cases to iOS handling locations
 - All 8 design files exist (`README.md` + `01-architecture.md` through `08-audit-lookups.md`)
 
 ---
@@ -106,7 +106,7 @@ CATEGORY C — OpenCV Edge Detection Verification
 CATEGORY D — Quality Checks
 
 - No Android API names appear anywhere in `design/` (grep for: `Camera2`, `Handler`, `Looper`, `SurfaceTexture`, `AHardwareBuffer`, `CaptureRequest`, `CaptureSession`, `ImageReader`, `MediaRecorder`, `backgroundHandler`, `mainHandler`, `EGLContext`, `EGLSurface`)
-- `design/08-audit-lookups.md` does not show signs of excessive audit consultation (more than 10 entries is a yellow flag suggesting `domain/` was insufficient or the designer over-relied on Android specifics)
+- `design/08-audit-lookups.md` does not show signs of excessive audit consultation (more than 10 entries is a yellow flag suggesting `domain-revised/` was insufficient or the designer over-relied on Android specifics)
 - Cross-references between design files are consistent (sections referenced in one file exist in the referenced file)
 
 ---
@@ -178,9 +178,9 @@ CATEGORY 5 — Escape Hatch Abuse
 
 Read `design/08-audit-lookups.md`. Look for these patterns:
 
-- **Excessive lookups:** More than 10 entries suggests the designer over-relied on Android specifics rather than using `domain/` as the primary source.
-- **Lookups that changed the design:** An audit read that changed a design decision suggests `domain/` was insufficient for that area; flag it as "domain/ gap."
-- **Topical clusters:** If most lookups are in one area (e.g., all about threading, or all about buffer management), that area may have a specific gap in `domain/`.
+- **Excessive lookups:** More than 10 entries suggests the designer over-relied on Android specifics rather than using `domain-revised/` as the primary source.
+- **Lookups that changed the design:** An audit read that changed a design decision suggests `domain-revised/` was insufficient for that area; flag it as "domain-revised/ gap."
+- **Topical clusters:** If most lookups are in one area (e.g., all about threading, or all about buffer management), that area may have a specific gap in `domain-revised/`.
 
 If any pattern suggests the design is Android-shaped rather than iOS-native, flag it with the specific lookups as evidence.
 
@@ -251,10 +251,10 @@ Write `review/README.md` with the following sections:
 </readme>
 
 <tool-usage>
-Read: files in `domain/` and `design/` only.
+Read: files in `domain-revised/` and `design/` only.
 Write: files in `review/` only.
 
-DO NOT read `audit/`, Android source code, `reference/` docs, screenshots, or git history. You never consult these. Your entire evidence base is `domain/` and `design/`.
+DO NOT read `audit/`, Android source code, `reference/` docs, screenshots, or git history. You never consult these. Your entire evidence base is `domain-revised/` and `design/`.
 </tool-usage>
 
 <quality-gates>

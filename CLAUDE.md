@@ -19,25 +19,26 @@ between stages, not by a compiler.
 |---|---|---|---|
 | 1 AUDIT | `prompt-1-audit.md` | `packed/`, `reference/`, `screenshots/` | `audit/` (13 files, Android-structured facts) |
 | 2 EXTRACT | `prompt-2-extract.md` | `audit/` only | `domain/` (13 files, platform-neutral requirements) |
-| 3 DESIGN | `prompt-3-design.md` | `domain/` primary + `audit/` escape hatch | `design/` (9 files, iOS architecture) |
-| 4 REVIEW | `prompt-4-review.md` | `domain/` + `design/` only | `review/` (3 files, Green/Yellow/Red verdict) |
+| 2.5 MANUAL REVIEW | (human) | `domain/` | `domain-revised/` (manually reviewed & corrected domain files) |
+| 3 DESIGN | `prompt-3-design.md` | `domain-revised/` primary + `audit/` escape hatch | `design/` (9 files, iOS architecture) |
+| 4 REVIEW | `prompt-4-review.md` | `domain-revised/` + `design/` only | `review/` (3 files, Green/Yellow/Red verdict) |
 
 `orchestrator-prompt.md` is an experimental all-in-one driver. `*.archived` files are the
 old 2-prompt pipeline kept for reference — do not edit or re-activate them.
 
 ## The load-bearing architectural rule: clean room separation
 
-Agent 3 (DESIGN) reads the platform-neutral `domain/` as its primary input so Android
-structure cannot leak into the iOS design. Two invariants enforce this:
+Agent 3 (DESIGN) reads the platform-neutral `domain-revised/` as its primary input so Android
+structure cannot leak into the iOS design. `domain-revised/` is a manually reviewed and
+corrected version of `domain/` (Agent 2's output). Two invariants enforce clean room separation:
 
-1. **`domain/` contains zero Android API names.** Agent 2 runs a mandatory grep self-audit
-   before emitting files. If you edit `domain/` by hand, re-run the grep checks below.
+1. **`domain-revised/` contains zero Android API names.** Verify before running Agent 3.
 2. **`audit/` is an escape hatch only.** Every lookup Agent 3 makes into `audit/` is logged
-   in `design/08-audit-lookups.md`. More than ~10 entries is a yellow flag that `domain/`
-   has a gap — the fix is to patch `domain/`, never to route around it.
+   in `design/08-audit-lookups.md`. More than ~10 entries is a yellow flag that `domain-revised/`
+   has a gap — the fix is to patch `domain-revised/`, never to route around it.
 
-`audit/` is organized by Android component; `domain/` is organized by behavioral concern.
-The deliberately different shapes are what stop `domain/` from being read as "translated
+`audit/` is organized by Android component; `domain-revised/` is organized by behavioral concern.
+The deliberately different shapes are what stop `domain-revised/` from being read as "translated
 Android docs".
 
 ## Common operations
@@ -56,6 +57,10 @@ grep -rn -E 'iOS|Swift|Metal|AVCapture|CVPixelBuffer|UIKit|SwiftUI' audit/
 grep -rn -E 'Camera2|CameraCaptureSession|CaptureRequest|HandlerThread|SurfaceTexture|AHardwareBuffer|ImageReader|MediaRecorder|EGLContext' domain/
 grep -rn -E 'because Camera2|Android equivalent|iOS equivalent|Kotlin|the Android version' domain/
 
+# Before Agent 3 (DESIGN): verify domain-revised/ is clean (same checks, different dir).
+grep -rn -E 'Camera2|CameraCaptureSession|CaptureRequest|HandlerThread|SurfaceTexture|AHardwareBuffer|ImageReader|MediaRecorder|EGLContext' domain-revised/
+grep -rn -E 'because Camera2|Android equivalent|iOS equivalent|Kotlin|the Android version' domain-revised/
+
 # After Agent 3 (DESIGN): audit lookups stayed bounded, OpenCV consumer is designed.
 cat design/08-audit-lookups.md                     # >10 entries = yellow flag
 grep -l 'cv::Canny\|EdgeDetection' design/04-opencv-integration.md
@@ -66,12 +71,13 @@ head -20 review/README.md                          # look for Green / Yellow / R
 
 There is no build, no linter, and no test runner. The grep commands above *are* the test suite.
 
-## Context-sensitive language rule for `domain/`
+## Context-sensitive language rule for `domain/` and `domain-revised/`
 
 Several Android class names are also ordinary English words (`Handler`, `Surface`, `Image`,
-`Message`). `domain/` may use them in their English sense ("the image buffer") but must not
-use them as Android type references ("the `ImageReader`"). When reviewing `domain/`, judge
-by whether the word names an Android API surface, not by raw grep hits on the word alone.
+`Message`). Both `domain/` and `domain-revised/` may use them in their English sense ("the
+image buffer") but must not use them as Android type references ("the `ImageReader`"). When
+reviewing either directory, judge by whether the word names an Android API surface, not by
+raw grep hits on the word alone.
 
 ## iOS stack the design assumes (from Agent 3's injected expertise)
 
@@ -86,8 +92,8 @@ actor boundaries. This expertise is injected via `prompt-3-design.md`, not deriv
 ## Reviewer discipline
 
 Agent 4 never reads `audit/`. If the reviewer finds a gap, the remedy is always "fix
-`domain/`" or "fix `design/`", never a localized patch. Re-run the upstream agent with the
-findings attached instead of hand-editing the output.
+`domain-revised/`" or "fix `design/`", never a localized patch. Re-run the upstream agent
+with the findings attached instead of hand-editing the output.
 
 ## Commit discipline
 
