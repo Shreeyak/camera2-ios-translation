@@ -10,21 +10,20 @@ flowchart TB
     HW --> AVOut
     HW --> AVPhoto
 
-    AVOut -->|CVPixelBuffer<br/>YpCbCr 4:2:0 BiPlanar<br/>~4000x3000| CD[CaptureDelegate]
+    AVOut -->|CVPixelBuffer<br/>kCVPixelFormatType_64RGBAHalf<br/>~4000x3000| CD[CaptureDelegate]
     CD -->|IncomingFrame| CE[CameraEngine.processFrame]
 
     subgraph EngineWork["CameraEngine actor — per frame work"]
         direction TB
         CE --> Wrap[CVMetalTextureCache wrap]
-        Wrap -->|R8Unorm<br/>Y plane texture| Compute
-        Wrap -->|RG8Unorm<br/>CbCr plane texture| Compute
-        Compute[Metal compute kernel<br/>YCbCr -> BGRA<br/>5-stage color pipeline]
+        Wrap -->|rgba16Float| Compute
+        Compute[Metal compute kernel<br/>half-float RGBA<br/>5-stage color pipeline]
     end
 
-    Compute -->|BGRA8Unorm<br/>full res| Proc[processedTexture]
-    Compute -->|BGRA8Unorm<br/>full res, passthrough| Nat[naturalTexture]
-    Compute -->|BGRA8Unorm<br/>480px height| Trk[trackerTexture]
-    Compute -.->|BGRA8Unorm<br/>only while recording| EncT[encoderTexture<br/>from IOSurface pool]
+    Compute -->|rgba16Float<br/>full res| Proc[processedTexture]
+    Compute -->|rgba16Float<br/>full res, passthrough| Nat[naturalTexture]
+    Compute -->|rgba16Float<br/>480px height| Trk[trackerTexture]
+    Compute -.->|bgra8Unorm<br/>downcast for encoder,<br/>only while recording| EncT[encoderTexture<br/>from IOSurface pool]
 
     Proc -->|OSAllocatedUnfairLock<br/>publish| PSlot[processedTextureSlot]
     Nat -->|OSAllocatedUnfairLock<br/>publish| NSlot[naturalTextureSlot]

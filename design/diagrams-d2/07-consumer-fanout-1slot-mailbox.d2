@@ -4,25 +4,27 @@
 
 shape: sequence_diagram
 
-CE: CameraEngine actor
-CR: ConsumerRegistry actor
+CE: CameraEngine actor (CaptureKit)
+CR: ConsumerRegistry actor (ImagingBridge)
 CQ: "Consumer DispatchQueue\n(serial, per consumer)"
-BR: "EdgeDetectionBridge\n(ObjC++)"
-CPP: "EdgeDetectionConsumer\n(C++)"
+BR: "ImagingCoreFacade\n(Swift, ImagingBridge)"
+CPP: "EdgeDetectionConsumer\n(C++, ImagingCore)"
 
 Frame N — consumer idle: {
   CE -> CR: "await dispatch(frameN, .tracker)"
   CR -> CR: "guard var entry = consumers[.tracker]"
   CR -> CR: "entry.isProcessing == false → idle branch"
   CR -> CR: "isProcessing = true\npendingFrame = nil\nconsumers[.tracker] = entry"
-  CR -> CQ: "queue.async { bridge.processFrame(frameN) }"
+  CR -> CQ: "queue.async { facade.process(frameN) }"
   CR -> CE: return
 }
 
 Consumer begins processing: {
-  CQ -> BR: processFrame(frameN)
-  BR -> CPP: onFrame(frameData)
-  CPP -> CPP: cv::cvtColor BGRA → gray
+  CQ -> BR: "facade.process(frameN)\n(Swift)"
+  BR -> BR: CVPixelBufferLockBaseAddress
+  BR -> CPP: "onFrame(FrameData{span<__fp16>})\n(direct Swift↔C++ interop, noexcept)"
+  CPP -> CPP: cv::transform RGBAHalf → gray16f (BT.709)
+  CPP -> CPP: gray16f.convertTo(gray8u, CV_8U)
   CPP -> CPP: cv::Canny
   CPP -> CPP: cv::findContours
 }
@@ -41,11 +43,13 @@ Frame N+2 — N+1 is overwritten (dropped): {
 }
 
 Consumer finishes N — markIdle picks up N+2: {
-  CPP -> BR: EdgeDetectionResult
-  BR -> CQ: processFrame(frameN) complete
+  CPP -> BR: "EdgeDetectionResultCxx (POD) + ErrorCode::Ok"
+  BR -> BR: CVPixelBufferUnlockBaseAddress
+  BR -> BR: "Convert POD → Sendable Swift EdgeDetectionResult"
+  BR -> CQ: "facade.process(frameN) complete"
   CQ -> CR: "Task { await markIdle(.tracker) }"
   CR -> CR: "pendingFrame == frameN+2"
   CR -> CR: "pendingFrame = nil\n(keep isProcessing = true)"
-  CR -> CQ: "queue.async { bridge.processFrame(frameN+2) }"
-  CQ -> BR: processFrame(frameN+2)
+  CR -> CQ: "queue.async { facade.process(frameN+2) }"
+  CQ -> BR: "facade.process(frameN+2)"
 }

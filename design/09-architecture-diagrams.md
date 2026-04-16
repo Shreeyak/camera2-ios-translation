@@ -81,7 +81,7 @@ flowchart TB
 
     subgraph App["CamPlugin (this project)"]
         direction TB
-        Core["Swift app<br/>CameraEngine · actors<br/>Metal pipeline · C++ consumers"]
+        Core["Swift app<br/>CaptureActor / FramePipeline · actors<br/>Metal pipeline · C++ consumers"]
     end
 
     User -->|taps, gestures,<br/>scene transitions| App
@@ -137,22 +137,23 @@ flowchart TB
         NMR[NaturalMetalRenderer<br/>MTKViewDelegate]
     end
 
-    subgraph Engine["CameraEngine actor"]
-        CE[session state<br/>Metal pipeline<br/>stall watchdogs<br/>recovery state machine]
+    subgraph Engine["CaptureActor (CaptureKit) + FramePipeline (PipelineKit)"]
+        CE[CaptureActor: session state<br/>stall watchdogs<br/>recovery state machine]
+        FP[FramePipeline: nonisolated<br/>AVCaptureVideoDataOutputSampleBufferDelegate<br/>drives 6-pass Metal command graph]
     end
 
     subgraph Support["Support actors"]
-        CR[ConsumerRegistry<br/>actor]
-        SC[StillCaptureController<br/>actor]
-        VR[VideoRecorder<br/>actor]
+        SC[StillWriter<br/>actor — EncoderKit]
+        VR[RecordingActor<br/>actor — EncoderKit]
     end
 
     subgraph ML["@MLProcessor — global actor"]
         MLP[edge result coalescing<br/>overlay state]
     end
 
-    subgraph Cpp["C++ consumers"]
-        EDC[EdgeDetectionConsumer<br/>own DispatchQueue]
+    subgraph Cpp["C++ consumers (PixelSink pool)"]
+        EDC[EdgeDetector<br/>C++ SWIFT_SHARED_REFERENCE<br/>ImagingCore]
+        PS[PixelSink<br/>C++ SWIFT_SHARED_REFERENCE<br/>fixed thread pool, MPSC lanes]
     end
 
     VM -->|await open / close<br/>await setResolution<br/>await setProcessingParameters| CE
@@ -161,19 +162,18 @@ flowchart TB
 
     CE -.->|AsyncStream:<br/>onStateChanged<br/>onError<br/>onFrameResult| VM
 
-    CD -->|"IncomingFrame<br/>@unchecked Sendable wrapper"| CE
+    FP -->|"Frame (IOSurface-backed)<br/>inline on delivery queue"| PS
 
     CE -->|OSAllocatedUnfairLock<br/>withLock publish| MR
     CE -->|OSAllocatedUnfairLock<br/>withLock publish| NMR
     MR -->|Task MainActor<br/>setNeedsDisplay| MR
     NMR -->|Task MainActor<br/>setNeedsDisplay| NMR
 
-    CE -->|await dispatch<br/>FramePacket| CR
-    CR -.->|AsyncStream<br/>bufferingNewest 1| EDC
-    EDC -.->|EdgeDetectionResult<br/>Sendable| MLP
+    PS -.->|1-slot mailbox<br/>MPSC per stream| EDC
+    EDC -.->|EdgeDetectionResult<br/>Sendable C-ABI callback| MLP
     MLP -.->|AsyncStream| VM
 
-    CE -->|await append<br/>recording frame| VR
+    FP -->|await append<br/>recording frame| VR
     SC -->|await session access<br/>AVCapturePhotoOutput| CE
     VR -->|await session access| CE
 
@@ -182,19 +182,21 @@ flowchart TB
     classDef noniso fill:#fee,stroke:#a66,color:#000
     classDef cpp fill:#efe,stroke:#6a6,color:#000
     class VM,UI main
-    class CE,CR,SC,VR,MLP actor
-    class CD,MR,NMR noniso
-    class EDC cpp
+    class CE,SC,VR,MLP actor
+    class CD,MR,NMR,FP noniso
+    class EDC,PS cpp
 ```
 
 **Key takeaways:**
 - Solid arrows = synchronous `await` across actors. Dashed = async continuous delivery (`AsyncStream`).
-- `MetalRenderer` and `CaptureDelegate` are **nonisolated** by necessity — they're invoked by
+- `MetalRenderer`, `CaptureDelegate`, and `FramePipeline` are **nonisolated** by necessity — they're invoked by
   the system (MTKView timer, AVFoundation serial queue) and cannot be actor-isolated without
-  deadlocking.
-- The crossings from the `CameraEngine` actor **to** the nonisolated renderers use
+  deadlocking. `FramePipeline` runs inline on the delivery queue (no `Task{}`).
+- The crossings from the `CaptureActor` **to** the nonisolated renderers use
   `OSAllocatedUnfairLock<MTLTexture?>` for the texture slot — actor isolation alone does not
   protect these reads (F-01 / C-03).
+- `PixelSink` is a C++ `SWIFT_SHARED_REFERENCE` class, not a Swift actor — consumer dispatch
+  is handled entirely in C++ via per-stream MPSC lanes with 1-slot mailboxes.
 - `@MLProcessor` is a custom global actor that keeps edge-detection result handling off the
   camera hot path.
 
@@ -222,21 +224,20 @@ flowchart TB
     HW --> AVOut
     HW --> AVPhoto
 
-    AVOut -->|CVPixelBuffer<br/>YpCbCr 4:2:0 BiPlanar<br/>~4000x3000| CD[CaptureDelegate]
-    CD -->|IncomingFrame| CE[CameraEngine.processFrame]
+    AVOut -->|CVPixelBuffer<br/>kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange<br/>~4000x3000| CD[CaptureDelegate]
+    CD -->|Frame (IOSurface-backed)| CE[FramePipeline — inline on delivery queue]
 
-    subgraph EngineWork["CameraEngine actor — per frame work"]
+    subgraph EngineWork["FramePipeline (nonisolated) — per frame work"]
         direction TB
         CE --> Wrap[CVMetalTextureCache wrap]
-        Wrap -->|R8Unorm<br/>Y plane texture| Compute
-        Wrap -->|RG8Unorm<br/>CbCr plane texture| Compute
-        Compute[Metal compute kernel<br/>YCbCr -> BGRA<br/>5-stage color pipeline]
+        Wrap -->|rgba16Float| Compute
+        Compute[Metal compute kernel<br/>half-float RGBA<br/>5-stage color pipeline]
     end
 
-    Compute -->|BGRA8Unorm<br/>full res| Proc[processedTexture]
-    Compute -->|BGRA8Unorm<br/>full res, passthrough| Nat[naturalTexture]
-    Compute -->|BGRA8Unorm<br/>480px height| Trk[trackerTexture]
-    Compute -.->|BGRA8Unorm<br/>only while recording| EncT[encoderTexture<br/>from IOSurface pool]
+    Compute -->|rgba16Float<br/>full res| Proc[processedTexture]
+    Compute -->|rgba16Float<br/>full res, passthrough| Nat[naturalTexture]
+    Compute -->|rgba16Float<br/>480px height| Trk[trackerTexture]
+    Compute -.->|bgra8Unorm<br/>downcast for encoder,<br/>only while recording| EncT[encoderTexture<br/>from IOSurface pool]
 
     Proc -->|OSAllocatedUnfairLock<br/>publish| PSlot[processedTextureSlot]
     Nat -->|OSAllocatedUnfairLock<br/>publish| NSlot[naturalTextureSlot]
@@ -250,8 +251,8 @@ flowchart TB
     MR -->|present| Disp1[MTKView<br/>processed preview]
     NMR -->|present| Disp2[MTKView<br/>natural preview]
 
-    TRB -->|wrap FramePacket<br/>CPU-visible pixels| CR[ConsumerRegistry<br/>dispatch tracker role]
-    CR -.->|AsyncStream<br/>bufferingNewest 1| EDC[EdgeDetectionConsumer<br/>cv::Canny]
+    TRB -->|wrap Frame<br/>CPU-visible pixels| CR[PixelSink<br/>dispatch StreamId::Tracker]
+    CR -.->|1-slot mailbox<br/>MPSC lane| EDC[EdgeDetector<br/>cv::Canny]
 
     EncT -.->|GPU-local blit<br/>stays in IOSurface| Pool[CVPixelBufferPool]
     Pool -.->|adaptor.append| AW[AVAssetWriterInput<br/>PixelBufferAdaptor]
@@ -262,29 +263,28 @@ flowchart TB
     classDef consume fill:#eef,stroke:#66a,color:#000
     class Disp1,Disp2,MR,NMR,PSlot,NSlot display
     class EncT,Pool,AW,VT record
-    class EDC,CR,TRB consume
+    class EDC,CR,TRB,CD,CE consume
 ```
 
 ### 3b — Buffer ownership and lifetime
 
 | Buffer | Type | Allocator | Retain period | Release trigger | Notes |
 |---|---|---|---|---|---|
-| `inputPixelBuffer` | `CVPixelBuffer` (YpCbCr 4:2:0 BiPlanar) | AVFoundation internal pool | Retained by `CMSampleBuffer`; transferred to actor via `IncomingFrame` | When the actor's `processFrame` returns (CFType release) | `@unchecked Sendable` wrapper — safe because `CVPixelBuffer` retain/release is thread-safe CFType semantics. AVFoundation reuses the buffer once all retains drop. |
-| `yTexture` | `MTLTexture` (R8Unorm) | `CVMetalTextureCache` wrap of `inputPixelBuffer` plane 0 | Per-frame; bound to the command buffer encode | Automatic when the command buffer completes | Zero-copy — same `IOSurface` as the input. Never copied to CPU. |
-| `cbcrTexture` | `MTLTexture` (RG8Unorm) | `CVMetalTextureCache` wrap, plane 1 | Per-frame | Automatic on command-buffer completion | Same zero-copy contract as Y. |
-| `processedTexture` | `MTLTexture` (BGRA8Unorm, full res) | `CameraEngine` at session-start (or resize) | Session | `teardownSession()` — also rebuilt on `setResolution()` | Pre-allocated; reused every frame. Size depends on `AVCaptureDevice.formats` selection. |
-| `naturalTexture` | `MTLTexture` (BGRA8Unorm, full res) | Same as above, only if `enableNaturalStream == true` | Session | `teardownSession()` | Passthrough — no GPU color transforms applied. |
-| `trackerTexture` | `MTLTexture` (BGRA8Unorm, aspect-preserving, 480 px tall, even-width) | Same as above | Session | `teardownSession()` | Fixed 480 px height per `domain/12-unresolved.md §U-15 RESOLVED`. Width formula preserved verbatim. |
-| `readbackBuffer[0]`, `readbackBuffer[1]` | `MTLBuffer` with `.storageModeShared` | `CameraEngine` at session-start | Session | `teardownSession()` | Double-buffered — Metal writes to `writeIndex`, CPU reads from `readIndex = 1 - writeIndex` after the previous command buffer's completion handler fires. Serves the `ProcessedFullResolution` consumer role (if any) and `sampleCenterPatch`. |
-| `trackerReadbackBuffer` | `MTLBuffer` with `.storageModeShared` | `CameraEngine` at session-start | Session | `teardownSession()` | CPU-accessible; blit target for `trackerTexture` → handed to `EdgeDetectionConsumer` wrapped as `FramePacket`. |
-| `encoderPixelBuffer` | `CVPixelBuffer` (IOSurface-backed, BGRA8888) | `adaptor.pixelBufferPool` created by `VideoRecorder` on recording start | Per recorded frame | Returned to pool after `AVAssetWriter` completes encoding | Pool configured with `kCVPixelBufferIOSurfacePropertiesKey: [:]` + `kCVPixelBufferMetalCompatibilityKey: true`. `maximumBufferCount ≥ 6` to survive encoder backlog during thermal throttling (F-04 deferred mitigation). |
+| `inputPixelBuffer` | `CVPixelBuffer` (kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange, IOSurface-backed) | AVFoundation internal pool | Retained by `CMSampleBuffer`; transferred via IOSurface-backed `Frame` struct | When `FramePipeline` completes inline processing (CFType release) | `@unchecked Sendable` wrapper — safe because `CVPixelBuffer` retain/release is thread-safe CFType semantics. AVFoundation reuses the buffer once all retains drop. |
+| `inputTexture` | `MTLTexture` (rgba16Float) | `CVMetalTextureCache` wrap of `inputPixelBuffer` | Per-frame; bound to the command buffer encode | Automatic when the command buffer completes | Zero-copy — same `IOSurface` as the input. Never copied to CPU. |
+| `processedTexture` | `MTLTexture` (rgba16Float, full res) | `FramePipeline` at session-start (or resize) | Session | `teardownSession()` — also rebuilt on `setResolution()` | Pre-allocated; reused every frame. Size depends on `AVCaptureDevice.formats` selection. Pass 1 converts from YUV to RGBA16F. |
+| `naturalTexture` | `MTLTexture` (rgba16Float, full res) | Same as above, only if `enableNaturalStream == true` | Session | `teardownSession()` | Passthrough — no GPU color transforms applied. |
+| `trackerTexture` | `MTLTexture` (rgba16Float, aspect-preserving, 480 px tall, even-width) | Same as above | Session | `teardownSession()` | Fixed 480 px height per `domain/12-unresolved.md §U-15 RESOLVED`. Width formula preserved verbatim. |
+| `readbackBuffer[0]`, `readbackBuffer[1]` | `MTLBuffer` with `.storageModeShared` | `FramePipeline` at session-start | Session | `teardownSession()` | Double-buffered — Metal writes to `writeIndex`, CPU reads from `readIndex = 1 - writeIndex` after the previous command buffer's completion handler fires. Serves the `ProcessedFullResolution` consumer role (if any) and `sampleCenterPatch`. |
+| `trackerReadbackBuffer` | `MTLBuffer` with `.storageModeShared` | `FramePipeline` at session-start | Session | `teardownSession()` | CPU-accessible; blit target for `trackerTexture` → handed to `EdgeDetector` via `PixelSink` wrapped as IOSurface-backed `Frame`. |
+| `encoderPixelBuffer` | `CVPixelBuffer` (IOSurface-backed, 8-bit YUV biplanar) | `adaptor.pixelBufferPool` created by `RecordingActor` on recording start | Per recorded frame | Returned to pool after `AVAssetWriter` completes encoding | Pool configured with `kCVPixelBufferIOSurfacePropertiesKey: [:]` + `kCVPixelBufferMetalCompatibilityKey: true`. `maximumBufferCount ≥ 6` to survive encoder backlog during thermal throttling (F-04 deferred mitigation). HEVC 8-bit via 8-bit YUV biplanar adaptor pool. |
 | `encoderTexture` | `MTLTexture` | `CVMetalTextureCache` wrap of `encoderPixelBuffer` | Per recorded frame | Implicit when the wrapped pixel buffer is appended to the adaptor | Recorder owns its **own** `CVMetalTextureCache` distinct from the input cache — mixing lifecycles is a bug. |
-| `textureSlot`, `naturalTextureSlot` | `OSAllocatedUnfairLock<MTLTexture?>` | `MetalRenderer` / `NaturalMetalRenderer` init | Renderer lifetime | Renderer `deinit` | Protects publisher (`CameraEngine`, actor-isolated) vs consumer (`draw(_:)`, nonisolated). Held for microseconds per swap. |
-| `framePacket` | Swift struct wrapping a `CVPixelBuffer` reference or `MTLBuffer` contents pointer | `CameraEngine` per frame at dispatch time | Lifetime of `EdgeDetectionConsumer.onFrame()` callback | Implicit when the consumer callback returns | The pixel data is valid **only** for the duration of the callback — consumers must copy if they retain. |
+| `textureSlot`, `naturalTextureSlot` | `OSAllocatedUnfairLock<MTLTexture?>` | `MetalRenderer` / `NaturalMetalRenderer` init | Renderer lifetime | Renderer `deinit` | Protects publisher (`FramePipeline`, nonisolated delivery queue) vs consumer (`draw(_:)`, nonisolated MTKView thread). Held for microseconds per swap. |
+| `frame` (IOSurface-backed `Frame` struct) | Swift struct wrapping an IOSurface-backed `CVPixelBuffer` | `FramePipeline` per frame at dispatch time | Lifetime of `EdgeDetector.onFrame()` C-ABI callback | Implicit when the consumer callback returns; IOSurface lock released | The pixel data is valid **only** while the IOSurface is locked — `EdgeDetector` locks IOSurface, runs cv::Canny, writes to shared `MTLTexture`, then releases. |
 
 **Invariants enforced by this layout:**
 - **Single memcpy per frame** (`domain/04-concurrency-invariants.md §Invariant 2`): Only the readback buffer paths perform a GPU→CPU blit; everything on the display and encoder paths stays in GPU/IOSurface memory.
-- **No per-consumer copies** (`domain/02-frame-delivery.md §Consumer Dispatch Semantics`): All registered consumers for a given role share the same `framePacket` — the 1-slot mailbox passes a reference, not a copy.
+- **No per-consumer copies** (`domain/02-frame-delivery.md §Consumer Dispatch Semantics`): All registered consumers for a given stream share the same `Frame` — the 1-slot MPSC mailbox in `PixelSink` passes a reference, not a copy.
 - **GPU→encoder zero-copy** (`domain/08-capture-and-recording.md §Video Encoding`): `MTLTexture.getBytes` is explicitly **forbidden** on the recording path (see `03-metal-pipeline.md §GPU-to-Encoder Path`).
 
 ---
@@ -295,33 +295,31 @@ Zoom into the compute kernel stage of diagram 3. Shows inputs, uniforms, and all
 a single command buffer encode pass, plus the post-compute blit pass.
 
 Cross-ref: `03-metal-pipeline.md §Compute Kernel`, `03-metal-pipeline.md §Texture Specification`,
-`06-decisions-log.md D-14 (SDR BGRA8Unorm throughout)`.
+`06-decisions-log.md D-18 (capture format: kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange; working format: RGBA16F throughout GPU passes)`.
 
 ```mermaid
 flowchart LR
     subgraph Inputs["Kernel inputs (per frame)"]
         direction TB
-        Y[yTexture<br/>texture2d R8Unorm<br/>Y plane, sensor resolution]
-        CB[cbcrTexture<br/>texture2d RG8Unorm<br/>CbCr plane, half resolution]
+        IN[inYUV (Y + CbCr planes)<br/>texture2d, read<br/>from kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange]
         U[ColorUniforms<br/>brightness, contrast, saturation,<br/>gamma, blackBalance<br/>enableNaturalStream flag]
     end
 
-    subgraph Kernel["Metal compute kernel — cam_pipeline.metal"]
+    subgraph Kernel["Metal compute kernel — cam_pipeline.metal (6-pass, half-float working)"]
         direction TB
-        K1[1. sample Y at gid<br/>sample CbCr at gid / 2]
-        K2[2. YCbCr -> RGB<br/>Rec.709 matrix]
+        K1[1. Pass 1: YUV → RGBA16F conversion<br/>BT.709 matrix, writes rgba16Float]
+        K2[2. black balance offset + rescale<br/>half math, full rate]
         K3[3. 5-stage color pipeline<br/>black balance -> brightness -><br/>contrast -> saturation -> gamma]
         K4[4. write processed<br/>write natural passthrough<br/>write tracker downscaled]
         K1 --> K2 --> K3 --> K4
     end
 
-    Y --> Kernel
-    CB --> Kernel
+    IN --> Kernel
     U --> Kernel
 
-    Kernel -->|BGRA8Unorm| P[processedTexture]
-    Kernel -->|BGRA8Unorm<br/>no color transforms| N[naturalTexture]
-    Kernel -->|BGRA8Unorm| T[trackerTexture<br/>480 px tall]
+    Kernel -->|rgba16Float| P[processedTexture]
+    Kernel -->|rgba16Float<br/>no color transforms| N[naturalTexture]
+    Kernel -->|rgba16Float| T[trackerTexture<br/>480 px tall]
 
     subgraph BlitPass["Post-compute blit pass (same command buffer)"]
         direction TB
@@ -342,9 +340,9 @@ flowchart LR
 ```
 
 **Key points:**
-- The compute kernel writes **three** outputs in a single dispatch (processed, natural, tracker) — one kernel, three `texture2d<half, access::write>` arguments. The natural stream is simply the pre-color-pipeline RGB written to its own target.
+- Pass 1 converts the YUV capture format to RGBA16F; subsequent passes operate in half-float throughout. The kernel writes **three** outputs in a single dispatch (processed, natural, tracker) — one kernel, three `texture2d<half, access::write>` arguments. The natural stream is simply the pre-color-pipeline RGBA16F written to its own target.
 - The blit pass is encoded into the **same** command buffer as the compute pass — they are committed together. This keeps the completion handler semantics coherent.
-- The encoder texture blit only executes when `VideoRecorder.recordingState == .recording`. When not recording, the encoder texture is not created and the adaptor pool is not allocated.
+- The encoder texture blit only executes when `RecordingActor.recordingState == .recording`. When not recording, the encoder texture is not created and the adaptor pool is not allocated.
 - The completion handler has two responsibilities (both added during the post-review patch pass): (a) check `cb.status == .error` for silent GPU failures (R-23), (b) re-enter the actor with the captured `expectedState` to guard against re-entrancy during teardown (F-01).
 
 ---
@@ -372,7 +370,7 @@ flowchart TB
         E10[CVPixelBufferPoolCreatePixelBuffer<br/>kCVReturnWouldBlock]
     end
 
-    subgraph Classifier["CameraEngine error classifier"]
+    subgraph Classifier["CaptureActor error classifier"]
         Decide{classify}
     end
 
@@ -447,7 +445,7 @@ sequenceDiagram
     participant AVF as AVCaptureSession
     participant CDQ as captureQueue<br/>(serial)
     participant CD as CaptureDelegate<br/>(nonisolated)
-    participant CE as CameraEngine<br/>(actor)
+    participant CE as FramePipeline<br/>(nonisolated — delivery queue)
     participant MTLQ as MTLCommandQueue
     participant GPU as GPU
     participant Lock as textureSlot<br/>(OSAllocatedUnfairLock)
@@ -458,11 +456,11 @@ sequenceDiagram
     AVF->>CDQ: dispatch didOutput sampleBuffer
     CDQ->>CD: captureOutput(_:didOutput:from:)
     CD->>CD: CMSampleBufferGetImageBuffer → CVPixelBuffer
-    CD->>CD: wrap as IncomingFrame (Sendable)
-    CD->>CE: Task { await processFrame(packet) }
+    CD->>CD: wrap as IOSurface-backed Frame
+    CD->>CE: inline call — no Task{} hop
 
     activate CE
-    CE->>CE: CVMetalTextureCache wrap → Y + CbCr
+    CE->>CE: CVMetalTextureCache wrap → Y + CbCr planes
     CE->>MTLQ: makeCommandBuffer
     CE->>MTLQ: encode compute pass
     CE->>MTLQ: encode blits — processed readback,<br/>tracker readback, encoder (if recording)
@@ -497,15 +495,15 @@ sequenceDiagram
     CE->>CE: if cb.status == .error → handleNonFatalError and return
     CE->>CE: Task { await onFrameReadbackComplete(readIndex, expectedState) }
     CE->>CE: guard sessionState == expectedState == .streaming
-    CE->>CE: readbackBuffer[readIndex].contents() → FramePacket
-    CE->>CE: await ConsumerRegistry.dispatch(frame, .tracker)
+    CE->>CE: readbackBuffer[readIndex].contents() → Frame (IOSurface-backed)
+    CE->>CE: PixelSink.dispatch(frame, StreamId::Tracker) — non-blocking
     deactivate CE
 
     Note over HW,MTK: Total capture-to-display latency: target < 16 ms,<br/>budget < 25 ms, fail > 25 ms
 ```
 
 **Key points:**
-- The capture queue is held only for the microseconds needed to extract the `CVPixelBuffer` and post the `Task`. The actor hop adds ~5–20 µs of scheduling overhead.
+- `FramePipeline` runs inline on the delivery queue — no `Task{}` hop. The capture queue is held for the encode + commit sequence, then released. This eliminates the actor scheduling overhead on the hot path.
 - The `par` block shows that **GPU execution and MTKView redraw overlap** — this is correct because the texture slot published the *previous* frame's output. The MTKView read happens on the Metal thread's `draw(_:)` callback; the GPU compute for the *next* frame runs concurrently.
 - The completion handler reads the readback buffer and dispatches to the consumer — this is the only CPU touch of processed pixels, and it happens one frame **after** the initial commit (double-buffered).
 
@@ -513,74 +511,76 @@ sequenceDiagram
 
 ## 7 — Fan-out to C++ consumer (1-slot mailbox)
 
-The drop-on-busy semantics of `ConsumerRegistry.dispatch`. Shows three frames arriving while
+The drop-on-busy semantics of `PixelSink` MPSC dispatch. Shows three frames arriving while
 the consumer is busy with the first, and how `markIdle` re-dispatches the newest pending frame.
 
-Cross-ref: `04-opencv-integration.md §ConsumerRegistry`, `domain/02-frame-delivery.md §Consumer
+Cross-ref: `04-opencv-integration.md §PixelSink`, `domain/02-frame-delivery.md §Consumer
 Dispatch Semantics`.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CE as CameraEngine actor
-    participant CR as ConsumerRegistry actor
-    participant CQ as Consumer DispatchQueue<br/>(serial, per consumer)
-    participant BR as EdgeDetectionBridge<br/>(ObjC++)
-    participant CPP as EdgeDetectionConsumer<br/>(C++)
+    participant CE as FramePipeline (PipelineKit)
+    participant CR as PixelSink C++ (ImagingBridge)<br/>MPSC lane — StreamId::Tracker
+    participant CQ as PixelSink thread pool<br/>(std::min(4, hw_concurrency))
+    participant BR as EdgeDetectorFacade<br/>(Swift, ImagingBridge)
+    participant CPP as EdgeDetector<br/>(C++, ImagingCore)
 
     Note over CE,CPP: Frame N arrives — consumer is idle
 
-    CE->>CR: await dispatch(frameN, .tracker)
+    CE->>CR: dispatch(frameN, StreamId::Tracker)<br/>called from GPU completion handler — non-blocking
     activate CR
-    CR->>CR: guard var entry = consumers[.tracker]
-    CR->>CR: entry.isProcessing == false → idle branch
-    CR->>CR: entry.isProcessing = true<br/>entry.pendingFrame = nil<br/>consumers[.tracker] = entry
-    CR->>CQ: queue.async { bridge.processFrame(frameN) }
-    CR-->>CE: return
+    CR->>CR: lane[Tracker].isProcessing == false → idle branch
+    CR->>CR: lane[Tracker].isProcessing = true<br/>lane[Tracker].pendingFrame = nil
+    CR->>CQ: pool thread: facade.process(frameN)
+    CR-->>CE: return (non-blocking)
     deactivate CR
 
     activate CQ
-    CQ->>BR: processFrame(frameN)
-    BR->>CPP: onFrame(frameData)
-    CPP->>CPP: cv::cvtColor BGRA → gray
+    CQ->>BR: facade.process(frameN)
+    BR->>BR: IOSurface lock (CVPixelBufferLockBaseAddress)
+    BR->>CPP: onFrame(FrameData{span<uint8_t> YUV})<br/>direct Swift↔C++ interop, noexcept
+    CPP->>CPP: YUV → gray8u (BT.709)
     CPP->>CPP: cv::Canny
     CPP->>CPP: cv::findContours
-    CPP-->>BR: EdgeDetectionResult
+    CPP->>CPP: write to shared MTLTexture
+    CPP-->>BR: fires C-ABI callback with EdgeDetectionResult
+    BR->>BR: IOSurface unlock<br/>convert POD → Sendable Swift struct
 
     Note over CE,CPP: Frame N+1 arrives while consumer is still busy
-    CE->>CR: await dispatch(frameN+1, .tracker)
+    CE->>CR: dispatch(frameN+1, StreamId::Tracker)
     activate CR
-    CR->>CR: entry.isProcessing == true → busy branch
-    CR->>CR: entry.pendingFrame = frameN+1<br/>consumers[.tracker] = entry
-    CR-->>CE: return (no queue dispatch)
+    CR->>CR: lane[Tracker].isProcessing == true → busy branch
+    CR->>CR: lane[Tracker].pendingFrame = frameN+1
+    CR-->>CE: return (no dispatch)
     deactivate CR
 
     Note over CE,CPP: Frame N+2 arrives — N+1 is overwritten (dropped)
-    CE->>CR: await dispatch(frameN+2, .tracker)
+    CE->>CR: dispatch(frameN+2, StreamId::Tracker)
     activate CR
-    CR->>CR: entry.pendingFrame = frameN+2<br/>(frameN+1 silently dropped)
+    CR->>CR: lane[Tracker].pendingFrame = frameN+2<br/>(frameN+1 silently dropped)
     CR-->>CE: return
     deactivate CR
 
-    BR-->>CQ: processFrame(frameN) complete
-    CQ->>CR: Task { await markIdle(.tracker) }
+    BR-->>CQ: facade.process(frameN) complete
+    CQ->>CR: markIdle(StreamId::Tracker)
     deactivate CQ
 
     activate CR
-    CR->>CR: entry.pendingFrame == frameN+2
-    CR->>CR: entry.pendingFrame = nil<br/>(keep isProcessing = true)
-    CR->>CQ: queue.async { bridge.processFrame(frameN+2) }
+    CR->>CR: pendingFrame == frameN+2
+    CR->>CR: pendingFrame = nil<br/>(keep isProcessing = true)
+    CR->>CQ: pool thread: facade.process(frameN+2)
     deactivate CR
 
     activate CQ
-    CQ->>BR: processFrame(frameN+2)
+    CQ->>BR: facade.process(frameN+2) via direct Swift↔C++ interop
     Note right of BR: frameN+1 was silently dropped<br/>per drop-on-busy policy — this is correct<br/>per domain/02-frame-delivery.md
     deactivate CQ
 ```
 
 **Key points:**
-- The `dispatch` method is **actor-isolated** (on `ConsumerRegistry`) but its execution is bounded — the queue dispatch is a fire-and-forget `async` call, so the actor is not held for consumer work.
-- The **producer (`CameraEngine`) is never blocked** by consumer slowness. The 1-slot mailbox guarantees memory stays flat (`O(1)` per consumer regardless of frame rate).
+- `PixelSink.dispatch` is **non-blocking** — it is called from the GPU completion handler and must return immediately. The MPSC lane atomically swaps the pending frame slot without taking a heavyweight lock.
+- The **producer (`FramePipeline`) is never blocked** by consumer slowness. The 1-slot mailbox guarantees memory stays flat (`O(1)` per consumer regardless of frame rate).
 - The "drop-on-busy" semantics are the key product contract: the consumer is guaranteed to always process the *newest* frame it can, never a stale one. This is the correct behavior for real-time edge detection.
 
 ---
@@ -596,8 +596,8 @@ Cross-ref: `03-metal-pipeline.md §GPU-to-Encoder Path`, `06-decisions-log.md D-
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CE as CameraEngine actor
-    participant VR as VideoRecorder actor
+    participant CE as FramePipeline (PipelineKit)
+    participant VR as RecordingActor (EncoderKit)
     participant Pool as CVPixelBufferPool<br/>(IOSurface-backed)
     participant TC as CVMetalTextureCache<br/>(recorder cache)
     participant CB as MTLCommandBuffer<br/>(shared with other blits)
@@ -612,7 +612,7 @@ sequenceDiagram
 
     CE->>Pool: CVPixelBufferPoolCreatePixelBuffer
     alt pool has buffer
-        Pool-->>CE: CVPixelBuffer (IOSurface-backed, BGRA)
+        Pool-->>CE: CVPixelBuffer (IOSurface-backed, 8-bit YUV biplanar)
     else pool exhausted (thermal backlog)
         Pool-->>CE: kCVReturnWouldBlock
         CE->>CE: droppedRecorderFrameCount += 1
@@ -639,7 +639,7 @@ sequenceDiagram
     CE->>VR: Task { await appendRecordedFrame(pixelBuffer, pts) }
 
     activate VR
-    VR->>VR: guard recordingState == .recording<br/>(actor guard — prevents append after stop)
+    VR->>VR: guard recordingState == .recording<br/>(RecordingActor guard — prevents append after stop)
     VR->>Adaptor: append(pixelBuffer, withPresentationTime: pts)
     Note right of Adaptor: append does NOT copy —<br/>VideoToolbox reads the same IOSurface
     Adaptor->>VT: submit IOSurface handle
@@ -651,7 +651,7 @@ sequenceDiagram
 
 **Key points:**
 - **The CPU never touches recorded pixel data.** Three GPU-side operations handle everything: (1) compute kernel writes `processedTexture`, (2) blit encoder copies to `encoderTexture`, (3) VideoToolbox reads the same `IOSurface`. Every buffer transition stays in GPU/shared memory.
-- The **recorder texture cache is separate** from the input texture cache. This is intentional: the input cache is invalidated on session teardown; the recorder cache is invalidated on recording stop. Mixing them couples their lifecycles incorrectly.
+- The **recorder texture cache is separate** from the input texture cache. This is intentional: the input cache is invalidated on session teardown; the recorder cache is invalidated on recording stop. Mixing them couples their lifecycles incorrectly. `RecordingActor` owns its own cache.
 - `CVPixelBufferPoolCreatePixelBuffer` can return `kCVReturnWouldBlock` under thermal throttling when the encoder backlog fills the pool. The correct response is to **drop the recording frame only** — the preview pipeline keeps going. This is the documented mitigation for F-04.
 
 ---
@@ -667,25 +667,26 @@ Cross-ref: `03-metal-pipeline.md §onFrameReadbackComplete`, `review/02-adversar
 sequenceDiagram
     autonumber
     participant VM as CameraViewModel
-    participant CE as CameraEngine actor
+    participant CE as CaptureActor
+    participant FP as FramePipeline<br/>(nonisolated, delivery queue)
     participant GPU as Metal GPU
     participant CH as Completion handler<br/>(Metal internal thread)
 
-    Note over VM,CH: Actor is busy with processFrame(N)
+    Note over VM,CH: FramePipeline is busy with processFrame(N)
 
     VM->>CE: await close()
-    Note right of CE: close() is enqueued in the actor mailbox —<br/>will run after processFrame(N) returns
+    Note right of CE: close() is enqueued in the CaptureActor mailbox —<br/>will run after any in-flight actor messages
 
-    activate CE
-    CE->>CE: processFrame(N) — encode command buffer
-    CE->>CE: frameSessionState = sessionState<br/>// captured as .streaming
-    CE->>CE: addCompletedHandler { cb in<br/>  if cb.status == .error { ... return }<br/>  Task { await onFrameReadbackComplete(<br/>    readIndex: i, expectedState: .streaming)<br/>  }<br/>}
-    CE->>CE: commandBuffer.commit()
-    CE->>CE: writeIndex = 1 - writeIndex
-    CE-->>CE: processFrame(N) returns
-    deactivate CE
+    activate FP
+    FP->>FP: processFrame(N) — encode command buffer inline
+    FP->>FP: frameSessionState = sessionState<br/>// captured as .streaming
+    FP->>FP: addCompletedHandler { cb in<br/>  if cb.status == .error { ... return }<br/>  Task { await onFrameReadbackComplete(<br/>    readIndex: i, expectedState: .streaming)<br/>  }<br/>}
+    FP->>FP: commandBuffer.commit()
+    FP->>FP: writeIndex = 1 - writeIndex
+    FP-->>FP: processFrame(N) returns
+    deactivate FP
 
-    Note over CE: Actor mailbox pumps — close() runs
+    Note over CE: CaptureActor mailbox pumps — close() runs
 
     activate CE
     CE->>CE: close()
@@ -718,7 +719,7 @@ sequenceDiagram
 
 ## 10 — Still capture in-flight guard
 
-Shows how `StillCaptureController.captureNaturalPicture()` enforces `domain/04-concurrency-invariants.md §Invariant 7`
+Shows how `StillWriter.captureNaturalPicture()` enforces `domain/04-concurrency-invariants.md §Invariant 7`
 (atomic one-capture-at-a-time) using actor isolation alone — no locks.
 
 Cross-ref: `02-concurrency.md §Invariant 7`, `05-implementation-phases.md §Phase 5 Acceptance Criteria`.
@@ -727,7 +728,7 @@ Cross-ref: `02-concurrency.md §Invariant 7`, `05-implementation-phases.md §Pha
 sequenceDiagram
     autonumber
     participant VM as CameraViewModel
-    participant SC as StillCaptureController<br/>(actor)
+    participant SC as StillWriter<br/>(actor — EncoderKit)
     participant APO as AVCapturePhotoOutput
     participant EX as EXIFWriter
     participant FS as FileSystem
@@ -737,11 +738,11 @@ sequenceDiagram
     VM->>SC: await captureNaturalPicture()
     activate SC
     SC->>SC: guard !captureInFlight else throw INVALID_STATE
-    Note right of SC: This check + the set on the next line<br/>both run synchronously before any<br/>await — they are atomic by actor<br/>construction.
+    Note right of SC: This check + the set on the next line<br/>both run synchronously before any<br/>await — they are atomic by StillWriter<br/>actor construction.
     SC->>SC: captureInFlight = true
     SC->>SC: defer { captureInFlight = false }
     SC->>APO: capturePhoto(with: settings, delegate: self)
-    Note right of SC: Await suspension here —<br/>actor is free to service other messages
+    Note right of SC: Await suspension here —<br/>StillWriter actor is free to service other messages
 
     Note over VM,SC: Second capture call arrives — actor is free
 
@@ -755,7 +756,7 @@ sequenceDiagram
     SC->>SC: receive AVCapturePhoto
     SC->>EX: buildEXIFProperties(sensor metadata)
     EX-->>SC: CFDictionary of EXIF tags
-    SC->>FS: write JPEG to temp URL
+    SC->>FS: write 8-bit TIFF via Pass 6 blit to temp URL
     SC->>EX: CGImageDestinationAddImageFromSource<br/>with EXIF dict
     FS-->>SC: path
     SC-->>VM: return path

@@ -3,7 +3,7 @@
 ## Overview
 
 The iOS design uses the **Sandwich pattern** — a three-layer architecture that cleanly separates
-declarative UI (SwiftUI), imperative GPU rendering (MTKView), and camera/pipeline logic (CameraEngine).
+declarative UI (SwiftUI), imperative GPU rendering (MTKView), and camera/pipeline logic (CaptureActor + FramePipeline).
 Data and configuration flow down; processed frames and results flow up. No layer reaches past its
 adjacent neighbor.
 
@@ -13,57 +13,67 @@ adjacent neighbor.
 
 ```mermaid
 graph TD
-    subgraph MainActor["@MainActor — UI Layer"]
-        VM["CameraViewModel\n(@Observable)"]
+    subgraph MainActor["@MainActor — EvaCore (SwiftUI, SE-0466 default isolation)"]
+        VM["CameraControlViewModel\n(@Observable)"]
         SV["CameraView\n(SwiftUI)"]
-        OV["EdgeDetectionOverlay\n(SwiftUI)"]
+        OV["EdgeOverlayView\n(MTKView wrapper)"]
         CS["ColorCalibrationSidebar\n(SwiftUI)"]
         CP["ControlsPanel\n(SwiftUI)"]
     end
 
-    subgraph Bridge["nonisolated — GPU Bridge"]
+    subgraph PipelineKit["PipelineKit — nonisolated delivery queue"]
+        FP["FramePipeline\n(command buffer orchestration)"]
         MR["MetalRenderer\n(MTKViewDelegate)"]
         MW["MetalViewWrapper\n(UIViewRepresentable)"]
     end
 
-    subgraph Engine["CameraEngine (actor)"]
-        CE["CameraEngine\nAVCaptureSession + MTLDevice"]
-        TC["TextureCache\nCVMetalTextureCache"]
+    subgraph CaptureKit["CaptureKit — CaptureActor (serial actor)"]
+        CA["CaptureActor\nAVCaptureSession lifecycle"]
+        DSS["DeviceStateStream\nKVO → AsyncStream"]
         SM["SessionStateMachine"]
-        CR["ConsumerRegistry"]
     end
 
-    subgraph Consumers["C++ Consumers"]
-        EC["EdgeDetectionConsumer\n(cv::Canny)"]
-        TC2["TrackerConsumer\n(external ML)"]
+    subgraph EncoderKit["EncoderKit"]
+        RA["RecordingActor\nHEVC 8-bit"]
+        SW["StillWriter\n8-bit TIFF"]
     end
 
-    subgraph Capture["Capture Controllers (@CameraActor)"]
-        SC["StillCaptureController\nAVCapturePhotoOutput"]
-        VR["VideoRecorder\nAVAssetWriter + HEVC"]
+    subgraph Interop["Interop (Swift, .interoperabilityMode(.Cxx))"]
+        PSF["PixelSinkFacade\n(SWIFT_SHARED_REFERENCE)"]
+        EDF["EdgeDetectorFacade\n(SWIFT_SHARED_REFERENCE)"]
+        MLP["MLProcessor\n(@globalActor)"]
+    end
+
+    subgraph ImagingCore["ImagingCore (C++ only, Apple-free)"]
+        PS["PixelSink\n(C++ thread pool, MPSC lanes)"]
+        ED["EdgeDetector\n(cv::Canny + compositing)"]
     end
 
     SV --> MW
     VM --> SV
     VM --> CS
     VM --> CP
-    OV --> SV
 
     MW --> MR
-    MR --> CE
+    MR --> FP
 
-    CE --> TC
-    CE --> SM
-    CE --> CR
-    CE --> SC
-    CE --> VR
+    CA --> SM
+    CA --> DSS
+    CA --> FP
 
-    CR --> EC
-    CR --> TC2
+    FP --> PSF
+    FP --> RA
+    FP --> SW
 
-    EC -->|"EdgeDetectionResult (Sendable)"| VM
-    CE -->|"SessionState (Sendable)"| VM
-    CE -->|"FrameResult (Sendable)"| VM
+    PSF --> PS
+    EDF --> ED
+    ED --> PS
+
+    ED -->|"shared MTLTexture"| OV
+    MLP -->|"EdgeResult (Sendable)"| VM
+    ED -->|"C-ABI callback"| MLP
+    CA -->|"SessionState (Sendable)"| VM
+    DSS -->|"AsyncStream<CameraState.Snapshot>"| VM
 ```
 
 ---
@@ -72,7 +82,7 @@ graph TD
 
 ### Layer 1 — SwiftUI + ViewModel (`@MainActor`)
 
-**Components:** `CameraView`, `CameraViewModel`, `ColorCalibrationSidebar`, `ControlsPanel`, `EdgeDetectionOverlay`
+**Components:** `CameraView`, `CameraControlViewModel`, `ColorCalibrationSidebar`, `ControlsPanel`, `EdgeOverlayView`
 
 **Responsibilities:**
 - Display session state (opening, streaming, recovering, paused, error, closed)
@@ -87,7 +97,7 @@ graph TD
 
 **Communication contract:**
 - Receives only `Sendable` value types from lower layers: `SessionState`, `FrameResult`, `EdgeDetectionResult`, `CameraError`, `RecordingState`
-- Sends `CameraSettings` and `ProcessingParameters` (value types, `Sendable`) down to `CameraEngine`
+- Sends `CameraSettings` and `ProcessingParameters` (value types, `Sendable`) down to `CaptureActor` and `FramePipeline`
 
 ---
 
@@ -104,56 +114,67 @@ graph TD
 **Isolation:** `nonisolated` — `MTKViewDelegate.draw(_:)` is called by the system on an arbitrary schedule and cannot be actor-isolated without deadlocking. All pixel data stays in `MetalRenderer` and never escapes to SwiftUI.
 
 **Communication contract:**
-- Receives `MTLTexture` references from `CameraEngine` via an atomic texture slot protected by `OSAllocatedUnfairLock<MTLTexture?>` (iOS 16+). The lock is held for microseconds per swap — it is not a lock-free structure, but it is contention-free in practice because producer and consumer touch it ~30–60 times per second on different threads.
-- `CameraEngine.processFrame` stores the newly-rendered texture via `textureSlot.withLock { $0 = newTexture }` after the Metal command buffer is committed (but the texture is safe to publish immediately — Metal guarantees GPU writes become visible to subsequent GPU reads through command queue ordering).
-- `MetalRenderer.draw(_:)` reads via `textureSlot.withLock { $0 }` and blits the result to the current drawable. A `nil` slot or a same-texture slot results in no-op.
-- Triggers `MTKView.setNeedsDisplay()` from `CameraEngine` (via `Task { @MainActor in ... }`) when a new texture is published, so that `MTKView` does not render stale frames on its own timer.
+- Receives `MTLTexture` references from `FramePipeline` via an atomic texture slot protected by `OSAllocatedUnfairLock<MTLTexture?>` (iOS 16+). The lock is held for microseconds per swap — contention-free in practice (~30 Hz producer, on-demand consumer).
+- `FramePipeline` stores the newly-rendered texture via `textureSlot.withLock { $0 = newTexture }` after Pass 3 is encoded. Metal command queue ordering guarantees GPU writes are visible to subsequent GPU reads.
+- `MetalRenderer.draw(_:)` reads via `textureSlot.withLock { $0 }` and blits the result to the current drawable. A `nil` slot results in no-op.
+- Triggers `MTKView.setNeedsDisplay()` from `FramePipeline` (via `Task { @MainActor in ... }`) so MTKView renders on-demand, not on its own 60 Hz timer.
 - **`MTKView` configuration (required):** `isPaused = true`, `enableSetNeedsDisplay = true`, `preferredFramesPerSecond = 30`, `framebufferOnly = false`. This puts the view in on-demand redraw mode — `draw(_:)` fires only when `setNeedsDisplay()` is called, not on a 60Hz internal timer.
 - Never calls back into SwiftUI directly; relies on `AsyncStream` + `CameraViewModel` for state
 
 ---
 
-### Layer 3 — Camera Engine (actor)
+### Layer 3 — Capture + Pipeline (CaptureKit + PipelineKit)
 
-**Components:** `CameraEngine` (Swift actor), `SessionStateMachine`, `ConsumerRegistry`, `CVMetalTextureCacheManager`, `StallWatchdog`, `SettingsPersistence`
+**CaptureActor (CaptureKit — serial actor):** Owns the `AVCaptureSession` lifecycle,
+discovers the back-facing main lens, applies `AVCaptureDevice` settings (ISO, exposure,
+focus, white balance), owns `SessionStateMachine`, and exposes `DeviceStateStream`
+(KVO → `AsyncStream<CameraState.Snapshot>`). CaptureKit has **no Metal, no C++**.
 
-**Responsibilities:**
-- Own and manage the `AVCaptureSession` lifecycle
-- Discover and open the back-facing main lens (`AVCaptureDevice`)
-- Initialize and tear down the Metal GPU pipeline (render pipeline, compute pipeline)
-- Implement the zero-copy camera-to-GPU path: `CVPixelBuffer` → `MTLTexture` via `CVMetalTextureCache`
-- Run the 8-step per-frame GPU processing sequence (see `design/03-metal-pipeline.md`)
-- Manage the `ConsumerRegistry` and dispatch frames to registered C++ consumers
-- Own the `SessionStateMachine` and all state transitions
-- Run stall watchdogs (GPU-level 3s, capture-result-level 5s)
-- Apply camera hardware settings (`AVCaptureDevice` configuration)
-- Orchestrate still capture and recording controllers
+**FramePipeline (PipelineKit — nonisolated, delivery queue):** Runs the 6-pass Metal
+command graph (see `design/03-metal-pipeline.md`) on the camera delivery queue
+(`.userInteractive`). Owns `CVMetalTextureCache`, `TexturePoolManager`, `MetalRenderer`,
+`StallWatchdog`, and `ThermalMonitor`. After GPU completion, calls `PixelSinkFacade.publish`
+— a non-blocking C++ call that dispatches IOSurfaces to `ImagingCore::PixelSink`.
+PipelineKit has **no AVFoundation, no C++**.
 
-**Isolation:** Swift `actor` — all state mutations are automatically serialized. Satisfies domain Invariant 1 (camera state exclusively serialized).
+**EncoderKit (RecordingActor + StillWriter):** `RecordingActor` (serial actor) manages
+`AVAssetWriter` + HEVC 8-bit encoding. `StillWriter` handles 8-bit TIFF output.
+Both receive gated commands from `FramePipeline` (Passes 5 and 6 respectively).
 
 **Communication contract:**
-- Receives commands from `@MainActor` via `async` actor method calls
-- Sends `Sendable` results back to `@MainActor` via `AsyncStream` or `async` return values
-- Dispatches frames to C++ consumers via `ConsumerRegistry` (non-blocking, drop-on-busy)
+- `CaptureActor` sends `Sendable` state via `AsyncStream` to `@MainActor`
+- `DeviceStateStream` sends `AsyncStream<CameraState.Snapshot>` to `CameraControlViewModel`
+- `FramePipeline` → `PixelSinkFacade.publish`: synchronous C++ call, no actor hop
+- `FramePipeline` → `RecordingActor`: actor method calls for gated recording pass
 
 ---
 
-### Layer 4 — C++ Consumers (independent execution contexts)
+### Layer 4 — C++ Consumers (ImagingCore, PixelSink thread pool)
 
-**Components:** `CppConsumerProtocol` (C++ interface), `EdgeDetectionConsumer`, external tracker consumers
+**Components:** `PixelSink` (C++ thread pool, MPSC lane per stream, SWIFT_SHARED_REFERENCE),
+`EdgeDetector` (subscribes to `StreamId::Tracker`, 640×480 RGBA16F, SWIFT_SHARED_REFERENCE)
 
 **Responsibilities:**
-- Receive frames via zero-copy `cv::Mat` or RGBA pointer wrapping `CVPixelBuffer` base address
-- Process frames on their own independent threads (not on the camera actor)
-- Return `Sendable` result structs to Swift via the `@MLProcessor` global actor
-- Never block the camera engine or Metal render path
+- `PixelSink` receives IOSurface-backed Frame structs from `FramePipeline` via `publish()` —
+  non-blocking; each per-stream lane has a 1-slot mailbox (newest overwrites pending)
+- `EdgeDetector` subscribes to `StreamId::Tracker`; for each frame:
+  locks the IOSurface, aliases as `cv::Mat CV_16FC4` (zero-copy), applies BT.709 grayscale
+  (R,G,B,A channel order), runs `cv::Canny`, composites edges onto the tracker frame in C++,
+  writes to a shared `MTLTexture`, invokes a C-ABI result callback
+- Never block the Metal render path — C++ dispatch is non-blocking from the GPU completion handler
+- **No Apple headers** in `ImagingCore` public headers. `ImagingCore` is independently
+  testable via `swift test` on macOS without Metal, AVFoundation, or a camera.
 
-**Isolation:** Each consumer owns its own `DispatchQueue` or `pthread`. Results are marshalled to `@MLProcessor` then to `@MainActor`.
+**Isolation:** PixelSink owns a C++ thread pool (`std::min(4, hw_concurrency)` threads).
+Each stream's MPSC lane dispatches independently. No Swift actor involvement on the frame path.
 
 **Communication contract:**
-- Receives: `CVPixelBuffer` (locked), frame metadata, frame index
-- Returns: typed result structs implementing `ConsumerResult` (marked `Sendable`)
-- Consumer interface defined in C++ (`IFrameConsumer`); implementation in ObjC++ (`.mm`)
+- `PixelSinkFacade` and `EdgeDetectorFacade` (in `Interop`) wrap both as SWIFT_SHARED_REFERENCE
+  objects — ARC-managed in Swift
+- EdgeDetector result → `MLProcessor` via C-ABI callback → `Task { await MLProcessor.shared.handle(...) }`
+- EdgeDetector → `EvaCore`: shared `MTLTexture` (`.shared` storage mode) read by `EdgeOverlayView` (MTKView)
+- OpenCV headers are **banned from all public headers** under `Sources/ImagingCore/include/`
+  and from all Swift code. Legal only inside `Sources/ImagingCore/src/*.cpp`.
 
 ---
 
@@ -162,30 +183,28 @@ graph TD
 ```mermaid
 sequenceDiagram
     participant Sensor as AVCaptureSession
-    participant Queue as Capture Serial Queue
-    participant Engine as CameraEngine (actor)
+    participant FP as FramePipeline (delivery queue)
     participant Cache as CVMetalTextureCache
-    participant Metal as Metal Compute Shader
-    participant MTK as MTKView (processed)
-    participant NATMTK as MTKView (natural)
-    participant Consumer as C++ Consumer
+    participant Metal as Metal Passes 1–3
+    participant MTK as MTKView (processed preview)
+    participant PS as ImagingCore::PixelSink (C++ pool)
+    participant ED as ImagingCore::EdgeDetector (C++ pool)
     participant ML as @MLProcessor
     participant UI as @MainActor ViewModel
 
-    Sensor->>Queue: captureOutput(_:didOutput:from:)
-    Queue->>Engine: await engine.processFrame(buffer)
-    Engine->>Cache: CVMetalTextureCacheCreateTextureFromImage
-    Cache-->>Engine: MTLTexture (zero-copy)
-    Engine->>Metal: Encode compute pass (color transforms)
-    Metal-->>Engine: Processed texture in output MTLTexture
-    Engine->>MTK: Set currentDrawable texture → display
-    Engine->>NATMTK: Set passthrough texture → display
-    Engine->>Engine: MTLBlitCommandEncoder → readback buffer
-    Engine->>Engine: Insert MTLFence; wait ≤8ms
-    Engine->>Engine: Map readback buffer (previous frame N-1)
-    Engine->>Consumer: dispatch frame (CVBufferRetain + async handoff)
-    Consumer-->>ML: ConsumerResult (Sendable)
-    ML-->>UI: await MainActor.run { viewModel.update(result) }
+    Sensor->>FP: captureOutput(_:didOutput:from:) [nonisolated]
+    FP->>Cache: CVMetalTextureCacheCreateTextureFromImage (Y + CbCr planes)
+    Cache-->>FP: yTex (R8Unorm) + cbcrTex (RG8Unorm) [zero-copy]
+    FP->>Metal: Encode Pass 1 crop_yuv8_to_rgba16f → naturalTex
+    FP->>Metal: Encode Pass 2 color_transform → processedTex
+    FP->>Metal: Encode Pass 3 preview render
+    Metal-->>MTK: processedTex → currentDrawable
+    FP->>FP: commandBuffer.addCompletedHandler fires
+    FP->>PS: PixelSink::publish(.natural, .processed, .tracker)  [non-blocking C++]
+    PS->>ED: Tracker lane: IOSurface frame → EdgeDetector callback
+    ED->>ED: IOSurfaceLock → cv::Canny → composite → write shared MTLTexture
+    ED->>ML: C-ABI callback → Task { await MLProcessor.shared.handle(result) }
+    ML-->>UI: Task { @MainActor viewModel.edgeResult = result }
 ```
 
 ---
@@ -194,72 +213,121 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Consumer as C++ Consumer Thread
-    participant Bridge as ObjC++ Bridge (.mm)
+    participant ED as ImagingCore::EdgeDetector (C++ pool thread)
     participant ML as @MLProcessor actor
-    participant VM as CameraViewModel (@MainActor)
-    participant UI as SwiftUI View
+    participant VM as CameraControlViewModel (@MainActor)
+    participant OV as EdgeOverlayView (MTKView)
 
-    Consumer->>Bridge: callbackWithResult(result)
-    Bridge->>ML: await MLProcessor.shared.handle(result)
-    ML->>ML: Validate, transform result to Sendable struct
-    ML->>VM: await MainActor.run { vm.edgeResult = result }
-    VM->>UI: @Observable triggers re-render
-    UI->>UI: EdgeDetectionOverlay renders edge mask
+    ED->>ED: Write composited edge overlay to shared MTLTexture
+    ED->>ML: C-ABI EdgeResultCallback → Task { await MLProcessor.shared.handle(...) }
+    ML->>ML: Convert C++ POD → Sendable EdgeResult
+    ML->>VM: Task { @MainActor vm.edgeResult = result }
+    VM->>OV: @Observable triggers MTKView redraw (reads shared MTLTexture)
 ```
 
 ---
 
 ## Module Layout
 
+The project is a **SwiftPM package** (`Package.swift` at the root). `App/` is a thin
+shell containing only `@main`, `Info.plist`, and assets. All production code lives
+in library targets under `Sources/<TargetName>/`. This forces modularity at the
+build-system level and enables the `ImagingCore` C++ target to be tested
+independently via `swift test` on the macOS host — no iOS device, no camera, no
+Metal, no AVFoundation required for the C++ unit tests.
+
 ```
 CamPlugin/
-├── App/
-│   ├── CamPluginApp.swift               # @main entry point
-│   └── AppDelegate.swift                # UIApplicationDelegate lifecycle
-├── UI/
-│   ├── CameraView.swift                 # Root SwiftUI view (split-screen)
-│   ├── CameraViewModel.swift            # @Observable; @MainActor
-│   ├── ColorCalibrationSidebar.swift    # GPU params sliders
-│   ├── ControlsPanel.swift              # ISO/exposure/focus/zoom bar
-│   ├── EdgeDetectionOverlay.swift       # SwiftUI canvas overlay for edges
-│   ├── RecordingIndicator.swift         # Timer + stop button
-│   └── CaptureBanner.swift              # Transient capture confirmation
-├── Metal/
-│   ├── MetalViewWrapper.swift           # UIViewRepresentable → MTKView
-│   ├── NaturalMetalViewWrapper.swift    # UIViewRepresentable → MTKView (natural)
-│   ├── MetalRenderer.swift              # MTKViewDelegate; nonisolated
-│   ├── CVMetalTextureCacheManager.swift # Cache lifecycle; created once
-│   ├── Shaders.metal                    # Compute kernel: YUV→RGBA + color transforms
-│   └── ColorTransformUniforms.swift     # Uniform buffer layout (Swift mirror)
-├── Engine/
-│   ├── CameraEngine.swift               # Swift actor; session owner
-│   ├── SessionStateMachine.swift        # State enum + transition logic
-│   ├── StallWatchdog.swift              # GPU (3s) + capture-result (5s) watchdogs
-│   ├── CameraDeviceDiscovery.swift      # AVCaptureDevice selection (back-main only)
-│   ├── CameraSettings+Apply.swift       # AVCaptureDevice configuration extension
-│   └── SettingsPersistence.swift        # UserDefaults wrapper; Codable settings
-├── Capture/
-│   ├── StillCaptureController.swift     # AVCapturePhotoOutput + EXIF
-│   ├── VideoRecorder.swift              # AVAssetWriter + HEVC/H.264
-│   └── EXIFWriter.swift                 # Image Properties EXIF dict builder
-├── Consumers/
-│   ├── ConsumerRegistry.swift           # Swift actor; manages C++ consumers
-│   ├── IFrameConsumer.hpp               # C++ pure-virtual interface
-│   ├── EdgeDetectionConsumer.hpp        # EdgeDetection consumer header
-│   ├── EdgeDetectionConsumer.cpp        # cv::Canny implementation
-│   ├── EdgeDetectionBridge.h            # ObjC++ bridge header
-│   ├── EdgeDetectionBridge.mm           # ObjC++ bridge implementation
-│   └── EdgeDetectionResult.swift        # Sendable result struct
-└── MLProcessorActor/
-    └── MLProcessor.swift                # @globalActor for ML/CV result routing
+├── Package.swift                           # SwiftPM root: all targets declared here
+├── App/                                    # Thin shell — EvaApp target
+│   ├── EvaApp.swift                        # @main; WindowGroup + Window("Inspector")
+│   ├── Info.plist
+│   └── Assets.xcassets
+│
+├── Sources/
+│   ├── EvaCore/                            # Swift — SwiftUI, ViewModels, navigation
+│   │   │                                   # SE-0466: default @MainActor isolation
+│   │   ├── CameraControlViewModel.swift    # @Observable; @MainActor
+│   │   ├── CameraView.swift                # Root SwiftUI view (split-screen)
+│   │   ├── ColorCalibrationSidebar.swift   # GPU color-transform param sliders
+│   │   ├── ControlsPanel.swift             # ISO/exposure/focus/zoom bar
+│   │   ├── EdgeOverlayView.swift           # MTKView wrapping shared MTLTexture from EdgeDetector
+│   │   ├── RecordingIndicator.swift        # Timer + stop button
+│   │   ├── CaptureBanner.swift             # Transient capture confirmation
+│   │   └── Inspector/                      # iPadOS 26 secondary window
+│   │       ├── InspectorView.swift
+│   │       ├── CaptureHistoryList.swift
+│   │       └── HistogramView.swift
+│   │
+│   ├── CaptureKit/                         # Swift — AVFoundation ONLY; no Metal, no C++
+│   │   ├── CaptureActor.swift              # Serial actor; AVCaptureSession lifecycle
+│   │   ├── SessionStateMachine.swift       # State enum + transition logic
+│   │   ├── DeviceStateStream.swift         # KVO → AsyncStream<CameraState.Snapshot>
+│   │   ├── CameraDeviceDiscovery.swift     # AVCaptureDevice selection (back-main only)
+│   │   ├── CameraSettings+Apply.swift      # AVCaptureDevice configuration extension
+│   │   └── SettingsPersistence.swift       # UserDefaults wrapper; Codable settings
+│   │
+│   ├── PipelineKit/                        # Swift + Metal — no AVFoundation, no C++
+│   │   ├── FramePipeline.swift             # Command buffer orchestration (delivery queue)
+│   │   ├── MetalRenderer.swift             # MTKViewDelegate; nonisolated
+│   │   ├── MetalViewWrapper.swift          # UIViewRepresentable → MTKView
+│   │   ├── NaturalMetalViewWrapper.swift   # UIViewRepresentable → MTKView (natural)
+│   │   ├── TexturePoolManager.swift        # MTLTexture pool lifecycle
+│   │   ├── StallWatchdog.swift             # GPU (3s) + capture-result (5s) watchdogs
+│   │   ├── ThermalMonitor.swift            # ProcessInfo.thermalState → banner-only v1
+│   │   ├── Shaders.metal                   # Passes 1–5 compute kernels
+│   │   └── ColorTransformUniforms.swift    # Uniform buffer layout (Swift mirror)
+│   │
+│   ├── EncoderKit/                         # Swift — HEVC recording + still capture
+│   │   ├── RecordingActor.swift            # Serial actor; AVAssetWriter + HEVC 8-bit
+│   │   ├── StillWriter.swift               # 8-bit TIFF output via Pass 6 blit
+│   │   ├── EXIFWriter.swift
+│   │   └── PhotoLibraryWriter.swift
+│   │
+│   ├── ImagingCore/                        # ── C++ ONLY; Apple-free ──
+│   │   ├── include/imagingcore/            # Public headers (no opencv2, no Apple)
+│   │   │   ├── PixelSink.hpp               # SWIFT_SHARED_REFERENCE; Frame struct; StreamId
+│   │   │   └── EdgeDetector.hpp            # SWIFT_SHARED_REFERENCE; subscribes to Tracker stream
+│   │   ├── src/                            # <opencv2/*> legal ONLY here
+│   │   │   ├── PixelSink.cpp               # C++ thread pool + MPSC lanes
+│   │   │   └── EdgeDetector.cpp            # cv::Canny + composite; all cv:: in try/catch
+│   │   └── module.modulemap                # Clang module for direct Swift import
+│   │
+│   ├── Interop/                            # Swift — only module with .interoperabilityMode(.Cxx)
+│   │   ├── PixelSinkFacade.swift           # SWIFT_SHARED_REFERENCE wrapper for PixelSink
+│   │   ├── EdgeDetectorFacade.swift        # SWIFT_SHARED_REFERENCE wrapper for EdgeDetector
+│   │   ├── EdgeResult.swift                # Sendable Swift struct (from C++ POD)
+│   │   └── MLProcessor.swift              # @globalActor for ML/CV result routing
+│   │
+│   └── TestingSupport/                     # Swift — synthetic frame provider for CI
+│       └── SyntheticFrameProvider.swift    # AVAssetReader replay
+│
+├── Tests/
+│   ├── EvaCoreTests/                       # Swift Testing
+│   ├── CaptureKitTests/                    # Swift Testing; uses TestingSupport
+│   ├── PipelineKitTests/                   # Swift Testing; golden-frame Metal compare
+│   ├── ImagingCoreTests/                   # C++ only; runs via `swift test` on macOS
+│   │   ├── PixelSinkTests.cpp
+│   │   └── EdgeDetectorTests.cpp
+│   └── InteropTests/                       # Swift Testing
+│
+└── Frameworks/
+    └── opencv2.xcframework                 # Wrapped as SwiftPM binaryTarget in Package.swift
 ```
+
+**Load-bearing invariants of this layout:**
+
+- **`ImagingCore` is Apple-free.** No `#import <Foundation/*>`, no `CoreVideo`, no `CVPixelBuffer`, no `IOSurface.h` in public headers. This is enforced by code review — keeping public headers Apple-free makes `ImagingCore` independently testable (`ImagingCoreTests` runs via `swift test` on macOS without a camera session).
+- **OpenCV is a private implementation detail of `ImagingCore`.** `<opencv2/opencv.hpp>` is legal in `Sources/ImagingCore/src/*.cpp` and nowhere else — not in any public header, not in any Swift file, not in `Interop`.
+- **`Interop` is the only module with `.interoperabilityMode(.Cxx)`.** It wraps `PixelSink` and `EdgeDetector` as SWIFT_SHARED_REFERENCE objects — ARC-managed in Swift. No Objective-C++ (`.mm`) files anywhere in the project.
+- **Frame dispatch is entirely C++ after the GPU completion handler.** `PixelSink::publish` is a non-blocking C++ call; no Swift actor hop is involved on the frame path.
+- **The clean module boundary makes `ImagingCoreTests` run on macOS.** Tests create IOSurface fixture buffers, publish via `PixelSink`, and assert `EdgeDetector` contour output — no Metal, no AVFoundation, no Xcode, no iOS device required.
 
 ---
 
 ## Session Model
 
-A single `CameraEngine` actor instance is created when `open()` is called and destroyed on `close()`. Only one session is active at a time. The back-facing main lens is the only supported camera; calling `open()` while a session is active is rejected with `INVALID_STATE`. The opaque integer handle is a session identifier vended at open time and validated on every subsequent call.
+A single `CaptureActor` instance is created when `open()` is called and destroyed on `close()`. Only one session is active at a time. The back-facing main lens is the only supported camera; calling `open()` while a session is active is rejected with `INVALID_STATE`. The opaque integer handle is a session identifier vended at open time and validated on every subsequent call.
 
 ---
 
@@ -268,8 +336,8 @@ A single `CameraEngine` actor instance is created when `open()` is called and de
 | Domain invariant | iOS mechanism |
 |---|---|
 | Preview shows GPU-processed output, never sensor output | `MTKView` displays Metal-processed texture; `AVCaptureVideoPreviewLayer` is NOT used in production |
-| Single memcpy per frame | CPU readback → shared `MTLBuffer`; consumers get pointer to same buffer via `CVBufferRetain` handoff |
-| Null field means "do not change" | `CameraSettings` uses `Optional` fields; `nil` is preserved through merge logic in `CameraEngine` |
-| ISO + exposure are coupled | Coupling enforced inside `CameraEngine.applySettings(_:)` before touching `AVCaptureDevice` |
-| Recording encodes GPU output directly | `AVAssetWriter` receives pixel buffers from Metal readback path; no CPU YUV conversion |
-| No CPU-side image processing | OpenCV edge detection is NEW (iOS-only capability), not ported from Android; GPU path is unchanged |
+| Single memcpy per frame on consumer path | IOSurface-backed frame structs published via PixelSink; consumers lock IOSurface directly — no CVPixelBuffer copy |
+| Null field means "do not change" | `CameraSettings` uses `Optional` fields; `nil` is preserved through merge logic in `CaptureActor` |
+| ISO + exposure are coupled | Coupling enforced inside `CaptureActor.applySettings(_:)` before touching `AVCaptureDevice` |
+| Recording encodes GPU output directly | Pass 5 (`rgba16f_to_yuv8`) writes to IOSurface-backed adaptor pool; `AVAssetWriter` maps the same IOSurface — no CPU copy |
+| No CPU-side image processing on preview path | OpenCV edge detection (NEW iOS-only capability) runs on PixelSink pool threads; GPU pipeline is unaffected |

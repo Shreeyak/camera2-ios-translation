@@ -1,27 +1,25 @@
 flowchart LR
     subgraph Inputs["Kernel inputs (per frame)"]
         direction TB
-        Y[yTexture<br/>texture2d R8Unorm<br/>Y plane, sensor resolution]
-        CB[cbcrTexture<br/>texture2d RG8Unorm<br/>CbCr plane, half resolution]
+        IN[inRGBAHalf<br/>texture2d half, read<br/>rgba16Float from kCVPixelFormatType_64RGBAHalf]
         U[ColorUniforms<br/>brightness, contrast, saturation,<br/>gamma, blackBalance<br/>enableNaturalStream flag]
     end
 
-    subgraph Kernel["Metal compute kernel — cam_pipeline.metal"]
+    subgraph Kernel["Metal compute kernel — cam_pipeline.metal (half-float)"]
         direction TB
-        K1[1. sample Y at gid<br/>sample CbCr at gid / 2]
-        K2[2. YCbCr -> RGB<br/>Rec.709 matrix]
+        K1[1. read half4 at gid<br/>AVFoundation delivers RGBA half directly]
+        K2[2. black balance offset + rescale<br/>half math, full rate]
         K3[3. 5-stage color pipeline<br/>black balance -> brightness -><br/>contrast -> saturation -> gamma]
         K4[4. write processed<br/>write natural passthrough<br/>write tracker downscaled]
         K1 --> K2 --> K3 --> K4
     end
 
-    Y --> Kernel
-    CB --> Kernel
+    IN --> Kernel
     U --> Kernel
 
-    Kernel -->|BGRA8Unorm| P[processedTexture]
-    Kernel -->|BGRA8Unorm<br/>no color transforms| N[naturalTexture]
-    Kernel -->|BGRA8Unorm| T[trackerTexture<br/>480 px tall]
+    Kernel -->|rgba16Float| P[processedTexture]
+    Kernel -->|rgba16Float<br/>no color transforms| N[naturalTexture]
+    Kernel -->|rgba16Float| T[trackerTexture<br/>480 px tall]
 
     subgraph BlitPass["Post-compute blit pass (same command buffer)"]
         direction TB

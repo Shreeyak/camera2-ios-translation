@@ -59,18 +59,17 @@ EngineWork: "CameraEngine actor — per frame work" {
   class: actor
   CE: CameraEngine.processFrame { class: actor }
   Wrap: CVMetalTextureCache wrap { class: actor }
-  Compute: "Metal compute kernel\nYCbCr → BGRA\n5-stage color pipeline" {
+  Compute: "Metal compute kernel\nhalf-float RGBA\n5-stage color pipeline" {
     class: actor
     style.fill: "#e0e7ff"
   }
   CE -> Wrap
-  Wrap -> Compute: "Y plane (R8Unorm)"
-  Wrap -> Compute: "CbCr plane (RG8Unorm)"
+  Wrap -> Compute: "rgba16Float input\n(from kCVPixelFormatType_64RGBAHalf)"
 }
 
-Proc: "processedTexture\nBGRA8Unorm full-res" { class: texture }
-Nat: "naturalTexture\nBGRA8Unorm passthrough" { class: texture }
-Trk: "trackerTexture\nBGRA8Unorm 480px" { class: texture }
+Proc: "processedTexture\nrgba16Float full-res" { class: texture }
+Nat: "naturalTexture\nrgba16Float passthrough" { class: texture }
+Trk: "trackerTexture\nrgba16Float 480px" { class: texture }
 EncT: "encoderTexture\n(only while recording)" { class: texture }
 
 PSlot: "processedTextureSlot\nOSAllocatedUnfairLock" { class: display }
@@ -95,7 +94,7 @@ VT: VideoToolbox encoder { class: record }
 HW -> Capture.AVOut
 HW -> Capture.AVPhoto
 
-Capture.AVOut -> CD: "CVPixelBuffer\nYpCbCr 4:2:0 BiPlanar\n~4000x3000"
+Capture.AVOut -> CD: "CVPixelBuffer\nkCVPixelFormatType_64RGBAHalf\n~4000x3000"
 CD -> EngineWork.CE: IncomingFrame
 
 EngineWork.Compute -> Proc

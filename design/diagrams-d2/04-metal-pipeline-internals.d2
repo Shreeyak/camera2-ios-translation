@@ -35,23 +35,22 @@ classes: {
 }
 
 Inputs: Kernel inputs (per frame) {
-  Y: "yTexture\ntexture2d R8Unorm\nY plane, sensor resolution" { class: input }
-  CB: "cbcrTexture\ntexture2d RG8Unorm\nCbCr plane, half resolution" { class: input }
+  IN: "inRGBAHalf\ntexture2d<half, read>\nkCVPixelFormatType_64RGBAHalf → rgba16Float" { class: input }
   U: "ColorUniforms\nbrightness, contrast, saturation\ngamma, blackBalance\nenableNaturalStream flag" { class: input }
 }
 
-Kernel: "Metal compute kernel — cam_pipeline.metal" {
-  K1: "1. sample Y at gid\nsample CbCr at gid / 2" { class: kernel }
-  K2: "2. YCbCr → RGB\n(Rec.709 matrix)" { class: kernel }
+Kernel: "Metal compute kernel — cam_pipeline.metal (half-float)" {
+  K1: "1. read half4 at gid\n(AVFoundation delivers RGBA half directly)" { class: kernel }
+  K2: "2. black balance offset + rescale\n(half math, full rate)" { class: kernel }
   K3: "3. 5-stage color pipeline\nblack balance → brightness →\ncontrast → saturation → gamma" { class: kernel }
   K4: "4. write processed\nwrite natural passthrough\nwrite tracker downscaled" { class: kernel }
   K1 -> K2 -> K3 -> K4
 }
 
 Outputs: {
-  P: "processedTexture\nBGRA8Unorm" { class: output }
-  N: "naturalTexture\nBGRA8Unorm\n(color pipeline bypassed)" { class: output }
-  T: "trackerTexture\nBGRA8Unorm\n(480px tall)" { class: output }
+  P: "processedTexture\nrgba16Float" { class: output }
+  N: "naturalTexture\nrgba16Float\n(color pipeline bypassed)" { class: output }
+  T: "trackerTexture\nrgba16Float\n(480px tall)" { class: output }
 }
 
 BlitPass: Post-compute blit pass (same command buffer) {
@@ -70,8 +69,7 @@ Completion: Command buffer completion {
   CH: "addCompletedHandler:\n1. check cb.status == .error\n2. Task { await onFrameReadbackComplete }\n   with expectedState guard" { class: completion }
 }
 
-Inputs.Y -> Kernel.K1
-Inputs.CB -> Kernel.K1
+Inputs.IN -> Kernel.K1
 Inputs.U -> Kernel.K3
 
 Kernel.K4 -> Outputs.P

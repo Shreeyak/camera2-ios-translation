@@ -1,355 +1,310 @@
 # 04 — OpenCV Integration
 
-This file covers the generic C++ consumer interface, OpenCV iOS framework setup,
-the edge detection consumer implementation, and the full result return path.
+This file covers the C++ consumer architecture (`PixelSink` + `EdgeDetector`), OpenCV iOS
+framework setup, the full EdgeDetector processing pipeline, the Interop Swift facade layer,
+and the result return path to `@MainActor`.
 
 **Note:** OpenCV edge detection is a NEW capability added for the iOS version.
 It does NOT exist in the Android source — this is not a port.
 
 ---
 
-## Generic C++ Consumer Interface
+## C++ Consumer Architecture: PixelSink + EdgeDetector
 
 ### Design Rationale
 
-The interface is designed so that adding a new consumer (e.g., a tracker, a depth estimator) requires no changes to `CameraEngine` or `ConsumerRegistry`. Consumers register themselves and the engine calls back via the interface.
+The previous IFrameConsumer + Swift ConsumerRegistry approach delivered frames via
+`CVPixelBuffer + std::span` with per-consumer `DispatchQueue` actors in Swift.
+This design replaces it with a fully C++ dispatch model:
 
-### `IFrameConsumer` — C++ Pure-Virtual Interface
+| Concern | Old design | New design |
+|---|---|---|
+| Frame handoff type | CVPixelBuffer + `std::span` (requires lock/unlock) | IOSurface-backed Frame struct (lock only in consumer) |
+| Dispatch ownership | Swift `ConsumerRegistry` actor (1-slot mailbox per consumer) | C++ `PixelSink` thread pool (MPSC lane per stream) |
+| Drop-on-busy policy | ConsumerRegistry drops at yield point | PixelSink lane overwrites 1-slot mailbox in C++ |
+| Swift actor involvement | Required on every frame dispatch | None on frame path; Swift only at subscription time |
+| C++ consumer interface | `IFrameConsumer` pure-virtual interface | SWIFT_SHARED_REFERENCE base class with C-ABI callback |
+
+**Key:** nothing on the 30 Hz frame clock hops a Swift actor boundary. PixelSink::publish
+is called from the GPU completion handler on the delivery queue; C++ consumers run on their
+own pool threads. Results return to Swift via C-ABI callbacks.
+
+### PixelSink — Public Header
 
 ```cpp
-// File: Consumers/IFrameConsumer.hpp
+// File: Sources/ImagingCore/include/imagingcore/PixelSink.hpp
 #pragma once
 #include <cstdint>
 
-struct FrameMetadata {
-    int64_t  sensorTimestampNs;
-    int64_t  exposureTimeNs;
-    int64_t  frameDurationNs;
-    int64_t  iso;
-    float    focusDistanceDiopters;
-    int32_t  aeState;
-    int32_t  afState;
-    int32_t  awbState;
-    int32_t  flashState;
+namespace imagingcore {
+
+enum class StreamId : uint8_t {
+    Natural   = 0,   // Full-crop RGBA16F stream
+    Processed = 1,   // Color-transformed RGBA16F stream
+    Tracker   = 2,   // 640×480 RGBA16F downscaled stream (for CV consumers)
 };
 
-struct FrameData {
-    const uint8_t*   pixels;        // RGBA8888; valid only for duration of onFrame()
-    int              width;
-    int              height;
-    int              bytesPerRow;   // stride; may be > width * 4
-    FrameMetadata    metadata;
-    uint64_t         frameIndex;    // monotonically increasing
+enum class PixelFormat : uint8_t {
+    RGBA16F = 0,   // Half-float RGBA, R,G,B,A channel order, used for all three streams
 };
 
-// Consumer roles supported by the pipeline
-enum class ConsumerRole {
-    ProcessedFullResolution,  // GPU-processed full-res stream
-    Tracker,                  // Downscaled 480px height stream
-    // Note: Natural stream is display-only and has NO consumer registration path (U-13)
+// IOSurface-backed frame descriptor. The iosurface field is an IOSurfaceRef
+// (void* to avoid importing <IOSurface/IOSurface.h> in the public header).
+// Consumers call IOSurfaceLock/IOSurfaceUnlock directly.
+struct Frame {
+    uint64_t  presentationTimeNs;   // Monotonic nanoseconds
+    int32_t   width;
+    int32_t   height;
+    PixelFormat format;             // Always RGBA16F in this design
+    void*     iosurface;            // IOSurfaceRef; non-owning — PixelSink retains it
 };
 
-class IFrameConsumer {
+// C-ABI callback type. Invoked on the PixelSink thread pool after IOSurface
+// is available. context is the pointer passed to subscribe().
+// The Frame's iosurface is valid until the callback returns.
+extern "C" using PixelSinkCallback = void (*)(const Frame*, void* context);
+
+class PixelSink {
 public:
-    virtual ~IFrameConsumer() = default;
+    // SWIFT_SHARED_REFERENCE — ARC-managed in Swift.
+    // Retain/release functions are defined in PixelSink.cpp.
+    static PixelSink* create() noexcept;
+    void retain() noexcept;
+    void release() noexcept;
 
-    // Called once before the consumer receives frames.
-    // Returns false if the consumer failed to initialize.
-    virtual bool configure(ConsumerRole role, int width, int height) = 0;
+    // Subscribe / unsubscribe a consumer for a stream.
+    // Thread-safe. callback and context are stored; callback is invoked on
+    // pool threads. Subscribing when already subscribed replaces the callback.
+    void subscribe(StreamId stream, PixelSinkCallback callback,
+                   void* context) noexcept;
+    void unsubscribe(StreamId stream) noexcept;
 
-    // Called for each frame. The pixel pointer in |frame| is valid ONLY for the
-    // duration of this call. If the consumer needs the data beyond this call,
-    // it must copy it. This method must return quickly — slow consumers drop frames.
-    virtual void onFrame(const FrameData& frame) = 0;
-
-    // Called when the consumer is being unregistered or the session is ending.
-    virtual void teardown() = 0;
-
-    // Returns a human-readable identifier for logging.
-    virtual const char* name() const = 0;
-};
-```
-
-### Memory Contract
-
-- The `pixels` pointer in `FrameData` is valid **only for the duration of `onFrame()`**.
-- The underlying `CVPixelBuffer` is retained (via `CVBufferRetain`) before `onFrame()` is called and released after `onFrame()` returns (via `CVBufferRelease`).
-- If a consumer needs to retain pixel data beyond `onFrame()`, it must copy the data before returning.
-- The `onFrame()` call is delivered to the consumer's own `DispatchQueue` (not the camera or GPU thread). Drop-on-busy: if the previous `onFrame()` has not returned by the time the next frame arrives, the new frame overwrites the pending slot.
-
----
-
-## Consumer Registration — Swift Side
-
-### `ConsumerRegistry` Actor
-
-```swift
-// File: Consumers/ConsumerRegistry.swift
-import Foundation
-
-actor ConsumerRegistry {
-    private var consumers: [ConsumerRole: ConsumerEntry] = [:]
-
-    struct ConsumerEntry {
-        let bridge: ConsumerBridge  // ObjC++ wrapper around IFrameConsumer
-        let queue: DispatchQueue
-        var pendingFrame: FramePacket?  // 1-slot mailbox
-        var isProcessing: Bool = false
-    }
-
-    // Register a consumer for a specific role.
-    // Thread-safe: actor-isolated.
-    func register(_ bridge: ConsumerBridge, for role: ConsumerRole) {
-        let queue = DispatchQueue(
-            label: "com.camplugin.consumer.\(role.rawValue)",
-            qos: .userInitiated
-        )
-        consumers[role] = ConsumerEntry(bridge: bridge, queue: queue)
-    }
-
-    func unregister(role: ConsumerRole) {
-        consumers.removeValue(forKey: role)
-    }
-
-    // Non-blocking dispatch. Drops frame if consumer is busy.
-    // Called from CameraEngine.processFrame (actor-isolated).
-    func dispatch(frame: FramePacket, to role: ConsumerRole) {
-        guard var entry = consumers[role] else { return }
-
-        if entry.isProcessing {
-            // Consumer is busy. Overwrite the 1-slot mailbox with the newest frame.
-            // The previous pendingFrame (if any) is silently dropped — this is the
-            // domain "drop-on-busy" back-pressure policy. markIdle() will pick up
-            // this latest pendingFrame after the current onFrame() returns.
-            entry.pendingFrame = frame
-            consumers[role] = entry
-            return
-        }
-
-        // Consumer is idle. Dispatch immediately. Clear any stale pendingFrame
-        // (there should not be one, but the invariant is preserved explicitly so
-        // that markIdle() never re-dispatches a frame we are about to process).
-        entry.isProcessing = true
-        entry.pendingFrame = nil
-        consumers[role] = entry
-
-        entry.queue.async { [weak self] in
-            entry.bridge.processFrame(frame)
-            Task { await self?.markIdle(role: role) }
-        }
-    }
-
-    // Called on the consumer's queue after bridge.processFrame returns.
-    // Hops back to the actor to check for a pending frame.
-    private func markIdle(role: ConsumerRole) {
-        guard var entry = consumers[role] else { return }
-
-        if let nextFrame = entry.pendingFrame {
-            // A newer frame arrived while the previous one was being processed.
-            // Clear the slot, keep isProcessing = true, dispatch the newest frame.
-            entry.pendingFrame = nil
-            // isProcessing stays true
-            consumers[role] = entry
-            entry.queue.async { [weak self] in
-                entry.bridge.processFrame(nextFrame)
-                Task { await self?.markIdle(role: role) }
-            }
-        } else {
-            // No pending frame. Mark consumer idle.
-            entry.isProcessing = false
-            consumers[role] = entry
-        }
-    }
-}
-```
-
----
-
-## Swift-C++ Interop Assessment for OpenCV
-
-### Assessment
-
-Swift's direct C++ interop (Swift 5.9+, Clang module importer) works well with simple C++ headers:
-- Plain types, structs, non-template classes: **compatible**
-- `std::vector`, `std::string` with explicit `Sendable` bridging: **compatible with effort**
-- OpenCV's `cv::Mat`, `cv::Size`, core headers: **NOT directly compatible**
-
-**Why OpenCV headers are incompatible with direct Swift-C++ interop:**
-- OpenCV extensively uses C++ templates (`cv::Mat_<T>`, `InputArray`, `OutputArray`)
-- OpenCV uses C++ exceptions — Swift cannot propagate C++ exceptions
-- OpenCV headers include complex macro chains (`CV_EXPORTS`, `CV_OVERRIDE`) that confuse the Clang module importer
-- `cv::Mat`'s reference-counting model (`UMatData`) is incompatible with Swift's `Sendable` requirements
-
-**Conclusion:** A two-layer bridge architecture is required:
-1. **Direct Swift-C++ interop:** Used for the generic `IFrameConsumer` interface and `FrameData`/`ConsumerRole` types — these are simple C++ constructs that Swift can bridge directly
-2. **ObjC++ bridge (.mm files):** Used for all OpenCV-specific code — the ObjC++ layer imports OpenCV headers and wraps the results in Objective-C types that Swift can call
-
-This is documented as design decision D-04 in `design/06-decisions-log.md`.
-
----
-
-## OpenCV iOS Framework Setup
-
-### Chosen Distribution: xcframework (pre-built)
-
-**Chosen:** xcframework from OpenCV's official release (opencv2.xcframework)
-
-**Alternatives considered:**
-- **CocoaPods:** `pod 'OpenCV'` — easiest setup; creates large dependency; 2026 CocoaPods deprecation trajectory is a risk; adds build-time dependency
-- **SPM:** OpenCV does not have an official SPM package as of 2026; third-party wrappers exist but introduce maintenance risk
-- **Build from source:** Maximum control, smallest footprint, but requires maintaining a complex CMake build configuration for multiple architectures
-
-**Chosen because:** xcframework provides:
-- Official, pre-built, Apple-signed framework from opencv.org
-- Supports arm64 (device) and x86_64/arm64 (simulator) in a single bundle
-- No Xcode cloud/SPM dependency
-- Straightforward "drag into Xcode" integration
-- Clear version pinning via filename and hash verification
-
-**Integration steps:**
-1. Download `opencv-4.x.y-ios-framework.zip` from opencv.org releases
-2. Unzip to `Frameworks/opencv2.xcframework`
-3. Add to "Frameworks, Libraries, and Embedded Content" in Xcode target settings
-4. Set "Embed & Sign" for device builds
-5. In `EdgeDetectionBridge.mm`, add `#import <opencv2/opencv.hpp>`
-
-**Note:** OpenCV iOS xcframework includes arm64 (device), arm64 simulator, and x86_64 simulator slices. No special build flags required for Swift Package Manager or Xcode 26.
-
----
-
-## Zero-Copy Frame Handoff Pattern
-
-The `CVPixelBuffer` arriving from Metal readback contains RGBA8888 data. The handoff to OpenCV uses `CVPixelBufferLockBaseAddress` to get the CPU pointer without copying:
-
-```objc
-// File: EdgeDetectionBridge.mm
-
-- (void)processFrame:(FramePacket *)packet {
-    CVPixelBufferRef buffer = packet.pixelBuffer;
-    
-    CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
-    
-    void *baseAddress = CVPixelBufferGetBaseAddress(buffer);
-    int width  = (int)CVPixelBufferGetWidth(buffer);
-    int height = (int)CVPixelBufferGetHeight(buffer);
-    int bytesPerRow = (int)CVPixelBufferGetBytesPerRow(buffer);
-    
-    // Wrap in cv::Mat — no copy; pixels are the same memory.
-    // The buffer is BGRA8Unorm (Metal's native pixel format on iOS). Channel order
-    // in memory is B, G, R, A. Do NOT use COLOR_RGBA2GRAY — the luminance weights
-    // applied to R and B are asymmetric (0.299 vs 0.114) and swapping them produces
-    // silently-wrong grayscale on every frame. No crash, no error — just wrong edges.
-    cv::Mat bgra(height, width, CV_8UC4, baseAddress, bytesPerRow);
-
-    // Convert BGRA → grayscale for Canny
-    cv::Mat gray;
-    cv::cvtColor(bgra, gray, cv::COLOR_BGRA2GRAY);
-    
-    // Run Canny edge detection
-    cv::Mat edges;
-    cv::Canny(gray, edges, _lowThreshold, _highThreshold);
-    
-    // Extract contours for Sendable result
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(edges, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    
-    CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
-    
-    // Convert result to Swift-friendly type and dispatch to @MLProcessor
-    [self deliverResult:contours frameIndex:packet.frameIndex processingStart:packet.captureTimestamp];
-}
-```
-
----
-
-## Edge Detection Consumer Implementation
-
-### Role Selection: `Tracker` (480px), NOT `ProcessedFullResolution`
-
-The `EdgeDetectionConsumer` registers for `ConsumerRole::Tracker` (the downscaled 480px-height stream), not `ConsumerRole::ProcessedFullResolution`. This is load-bearing for the 16ms frame budget:
-
-| Role | Resolution | Pixels/frame | Canny CPU cost (est.) | Fits 16ms budget? |
-|---|---|---|---|---|
-| ProcessedFullResolution | ~4000×3000 | ~12M | 80–120 ms/frame on A17 | **No** (5–7× over budget) |
-| Tracker | 640×480 (aspect-rounded) | ~0.3M | 2–4 ms/frame on A17 | **Yes** (with headroom) |
-
-Canny edge detection is `O(pixels)` dominated by the Gaussian blur and Sobel gradient passes. At full sensor resolution (~12M pixels) it is prohibitively expensive to run per-frame on the CPU, even with OpenCV's SIMD optimizations. The tracker-resolution stream is specifically designed for per-frame ML / CV consumers — 480px height is a fixed compile-time value (see `domain/12-unresolved.md §U-15 RESOLVED`) precisely because this is the intended downsampling target for consumers.
-
-The edge overlay is drawn on the preview in SwiftUI `Canvas` at display resolution, so the visual fidelity loss from detecting at 480px and rendering the resulting contours at ~3000px is negligible — edges are scaled up as `Path` strokes, not as bitmap edges.
-
-**Registration contract:** `EdgeDetectionConsumer::configure()` asserts that `role == ConsumerRole::Tracker` and returns `false` for any other role. The Swift-side registration call passes `.tracker` explicitly:
-
-```swift
-// In CameraEngine setup:
-let edgeBridge = EdgeDetectionBridge(lowThreshold: 50, highThreshold: 150)
-await consumerRegistry.register(edgeBridge, for: .tracker)
-```
-
-Registering the edge consumer for `.processedFullResolution` is an implementation error and must trigger an assertion failure in DEBUG builds.
-
-### `EdgeDetectionConsumer` — C++ Class
-
-```cpp
-// File: Consumers/EdgeDetectionConsumer.hpp
-#pragma once
-#include "IFrameConsumer.hpp"
-#include <cassert>
-
-class EdgeDetectionConsumer final : public IFrameConsumer {
-public:
-    EdgeDetectionConsumer();
-    ~EdgeDetectionConsumer() override = default;
-
-    // Accepts ONLY ConsumerRole::Tracker. Returns false for any other role.
-    bool configure(ConsumerRole role, int width, int height) override {
-        if (role != ConsumerRole::Tracker) {
-            // Canny on ProcessedFullResolution (~12M pixels) exceeds the 16ms frame
-            // budget by 5–7×. The tracker role (480px height) is the only supported
-            // input for this consumer.
-            assert(false && "EdgeDetectionConsumer only supports ConsumerRole::Tracker");
-            return false;
-        }
-        _width  = width;
-        _height = height;  // Expected: 480; width derived from aspect ratio
-        return true;
-    }
-
-    void onFrame(const FrameData& frame) override;
-    void teardown() override;
-    const char* name() const override { return "EdgeDetectionConsumer"; }
-
-    // Canny thresholds — settable from Swift via ObjC++ bridge
-    void setThresholds(double low, double high);
+    // Publish a frame to all subscribers of the given stream. Non-blocking.
+    // Each subscriber's MPSC lane gets a 1-slot mailbox: newest overwrites pending.
+    // Called from the GPU completion handler on the delivery queue.
+    void publish(StreamId stream, const Frame& frame) noexcept;
 
 private:
-    double _lowThreshold  = 50.0;
-    double _highThreshold = 150.0;
-    int _width  = 0;
-    int _height = 0;   // Always 480 (per U-15 RESOLVED)
-    // Result callback — called on consumer's thread
-    std::function<void(/* edge result */)> _resultCallback;
+    // Thread pool (std::min(4, hw_concurrency) threads)
+    // Per-stream MPSC lane with 1-slot mailbox
+    // ... (implementation detail)
 };
+
+} // namespace imagingcore
 ```
 
-### Result Type Choice: Edge Contour List (not binary mask)
+**SWIFT_SHARED_REFERENCE annotation** (in Package.swift `cxxSettings` or via a compiler
+flag) enables ARC management of `PixelSink*` in Swift. The Swift `Interop` module wraps
+it in `PixelSinkFacade` (see below) and calls `subscribe`/`unsubscribe` at session
+start/stop.
 
-**Chosen: `[EdgeContour]` — array of contour point arrays**
+### EdgeDetector — Public Header
 
-**Alternatives considered:**
-- **Binary edge mask (pixel buffer):** A 1-bit or 8-bit mask at full resolution. Pros: dense, easy to overlay. Cons: 49.5 MB at full resolution is expensive to transfer across the Swift-C++ boundary; requires a SwiftUI `Canvas` or Metal overlay to render.
-- **Edge contour list:** `cv::findContours` produces compact vector of point arrays. Pros: small (`O(edges)` not `O(pixels)`); `Sendable` struct of `[SIMD2<Int32>]` arrays; easy to render in SwiftUI `Canvas` with `Path`. Cons: loses interior edge information; requires `cv::findContours` in addition to `cv::Canny`.
+```cpp
+// File: Sources/ImagingCore/include/imagingcore/EdgeDetector.hpp
+#pragma once
+#include "PixelSink.hpp"
+#include <cstdint>
 
-**Chosen because:** Contour list is small, `Sendable`, and renders efficiently in SwiftUI. The binary mask would require either a separate `MTLTexture` (adds complexity) or an RGBA `CVPixelBuffer` transfer (expensive). For the proof-of-concept purpose of this consumer (validate the full integration path), contours are sufficient.
+namespace imagingcore {
 
-This decision is logged in `design/06-decisions-log.md` entry D-06.
+// POD result types — fully importable into Swift via direct C++ interop.
+// No cv:: types, no templates, no exceptions.
+struct EdgePoint  { int32_t x; int32_t y; };
+struct EdgeContour { EdgePoint* points; int32_t count; };  // pool-allocated
+
+enum class EdgeStatus : uint8_t { Ok = 0, Error = 1 };
+
+struct EdgeResult {
+    EdgeStatus status;
+    EdgeContour* contours;     // pool-allocated array; valid until next onFrame
+    int32_t      contourCount;
+    int64_t      framePTS;     // presentationTimeNs from Frame
+    double       processingTimeMs;
+};
+
+// C-ABI callback invoked after each frame is processed.
+extern "C" using EdgeResultCallback = void (*)(const EdgeResult*, void* context);
+
+class EdgeDetector {
+public:
+    // SWIFT_SHARED_REFERENCE — ARC-managed in Swift.
+    static EdgeDetector* create(PixelSink* sink) noexcept;
+    void retain() noexcept;
+    void release() noexcept;
+
+    // Subscribe to StreamId::Tracker on the given PixelSink.
+    // Must be called before the capture session starts.
+    void subscribe() noexcept;
+    void unsubscribe() noexcept;
+
+    // Set Canny thresholds at runtime (thread-safe, atomic store).
+    void setThresholds(double low, double high) noexcept;
+
+    // Set callback to invoke after each processed frame.
+    void setResultCallback(EdgeResultCallback callback, void* context) noexcept;
+
+    // Shared MTLTexture that EdgeDetector composites into.
+    // Swift MTKView reads this texture for edge overlay rendering.
+    // id<MTLTexture> as void* to avoid Metal headers in public API.
+    void setOutputTexture(void* mtlTexture) noexcept;
+
+private:
+    // Subscribed to PixelSink::StreamId::Tracker
+    // Owns result contour pool
+    // ... (implementation detail)
+};
+
+} // namespace imagingcore
+```
 
 ---
 
-## Edge Detection Result — Sendable Swift Struct
+## EdgeDetector Processing Pipeline
+
+EdgeDetector MUST subscribe to `StreamId::Tracker` (640×480 downscaled stream),
+NOT `StreamId::Processed` (full crop resolution). This is load-bearing for the
+16ms frame budget:
+
+| Stream | Resolution | Pixels/frame | Canny CPU cost (est.) | Fits 16ms? |
+|---|---|---|---|---|
+| Processed | ~1600×1200 (after crop) | ~1.9M | 15–25 ms/frame on A16 | Marginal |
+| Tracker | 640×480 | ~0.3M | 2–4 ms/frame on A16 | Yes |
+
+Canny is `O(pixels)` dominated by Gaussian blur + Sobel gradient. The tracker stream
+is specifically sized for per-frame CV consumers.
+
+### Per-Frame Processing (in EdgeDetector.cpp)
+
+```
+Frame arrives from PixelSink (StreamId::Tracker, 640×480, RGBA16F, IOSurface-backed)
+
+1. IOSurfaceLock(iosurface, kIOSurfaceLockReadOnly)
+2. cv::Mat rgba16f = alias as CV_16FC4 (zero-copy over IOSurface pixel data)
+   width=640, height=480, step=bytesPerRow
+3. cv::transform(rgba16f, gray16f,
+       cv::Matx<float, 1, 4>(0.2126f, 0.7152f, 0.0722f, 0.0f))
+   // BT.709 luma; channel order is R,G,B,A — NOT BGRA
+4. gray16f.convertTo(gray8u, CV_8U, 255.0)
+   // Canny requires CV_8UC1 input
+5. cv::Canny(gray8u, edges, lowThreshold_, highThreshold_)
+6. cv::findContours(edges, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE)
+7. Composite edge overlay onto rgba16f:
+   Draw contour paths in green onto the tracker frame (C++ only — no Metal)
+8. IOSurfaceUnlock(iosurface, kIOSurfaceLockReadOnly)
+9. Write composited result to the shared MTLTexture (pre-allocated .shared storage)
+   using Metal's texture.replace(region:...) or a blit pass on the main Metal queue
+10. Invoke EdgeResultCallback with EdgeResult { status, contours, framePTS, processingTimeMs }
+```
+
+**Channel order note:** IOSurface data is RGBA16F (R, G, B, A). BT.709 weights apply
+to (R, G, B) in that order — `(0.2126, 0.7152, 0.0722, 0.0)`. BGRA is never used.
+
+**Why compositing happens in C++:** Intentionally less efficient than a Metal-overlay
+approach. It mirrors the future architecture where C++ will perform complex multi-layer
+overlays, stain normalization previews, and ROI annotations.
+
+**Shared MTLTexture:** Pre-allocated by `FramePipeline` at session start with
+`.shared` storage mode and appropriate mipmap levels. EdgeDetector writes to it;
+Swift MTKView reads it. Because the texture has `.shared` storage, CPU writes are
+visible to the GPU without a blit. Mipmap levels provide filtering quality when the
+overlay is zoomed out.
+
+---
+
+## Swift Interop Layer (Interop Module)
+
+`Sources/Interop/` contains pure Swift. It imports `ImagingCore` via
+`.interoperabilityMode(.Cxx)` and `CoreVideo`/`Metal` for texture management.
+There are NO `.mm` files anywhere.
+
+### PixelSinkFacade
 
 ```swift
-// File: Consumers/EdgeDetectionResult.swift
+// File: Sources/Interop/PixelSinkFacade.swift
+import ImagingCore   // Clang module via .interoperabilityMode(.Cxx)
+import Metal
 
+// SWIFT_SHARED_REFERENCE makes imagingcore.PixelSink ARC-manageable in Swift.
+// PixelSinkFacade is a thin Swift wrapper that owns the C++ PixelSink.
+final class PixelSinkFacade {
+    private let sink: imagingcore.PixelSink   // ARC-managed via SWIFT_SHARED_REFERENCE
+
+    init() {
+        sink = imagingcore.PixelSink.create()
+    }
+
+    // Called by FramePipeline GPU completion handler (delivery queue)
+    func publish(stream: imagingcore.StreamId, frame: imagingcore.Frame) {
+        sink.publish(stream, frame)
+    }
+
+    func subscribe(stream: imagingcore.StreamId,
+                   callback: imagingcore.PixelSinkCallback,
+                   context: UnsafeMutableRawPointer?) {
+        sink.subscribe(stream, callback, context)
+    }
+
+    func unsubscribe(stream: imagingcore.StreamId) {
+        sink.unsubscribe(stream)
+    }
+
+    // Raw pointer for passing to EdgeDetector.create()
+    var rawSink: imagingcore.PixelSink { sink }
+}
+```
+
+### EdgeDetectorFacade
+
+```swift
+// File: Sources/Interop/EdgeDetectorFacade.swift
+import ImagingCore
+import Metal
+
+final class EdgeDetectorFacade {
+    private let detector: imagingcore.EdgeDetector   // SWIFT_SHARED_REFERENCE
+    private var outputTexture: MTLTexture?
+
+    init(pixelSink: PixelSinkFacade) {
+        detector = imagingcore.EdgeDetector.create(pixelSink.rawSink)
+    }
+
+    // Called once at session start. texture must be .shared storage mode.
+    func configure(outputTexture: MTLTexture,
+                   lowThreshold: Double = 50,
+                   highThreshold: Double = 150) {
+        self.outputTexture = outputTexture
+        detector.setOutputTexture(Unmanaged.passUnretained(outputTexture as AnyObject)
+                                            .toOpaque())
+        detector.setThresholds(lowThreshold, highThreshold)
+        detector.setResultCallback(edgeResultCallback,
+                                   Unmanaged.passRetained(self).toOpaque())
+    }
+
+    // Set Canny thresholds at runtime (e.g., from a SwiftUI slider)
+    func setThresholds(low: Double, high: Double) {
+        detector.setThresholds(low, high)
+    }
+
+    func start() { detector.subscribe() }
+    func stop()  { detector.unsubscribe() }
+}
+
+// C-ABI callback — called on PixelSink pool thread after each frame
+private func edgeResultCallback(_ result: UnsafePointer<imagingcore.EdgeResult>?,
+                                 context: UnsafeMutableRawPointer?) {
+    guard let result, let context else { return }
+    let facade = Unmanaged<EdgeDetectorFacade>.fromOpaque(context)
+                                              .takeUnretainedValue()
+    let swiftResult = EdgeResult(from: result.pointee)
+    Task { await MLProcessor.shared.handle(swiftResult) }
+}
+```
+
+### EdgeResult — Sendable Swift Struct
+
+```swift
+// File: Sources/Interop/EdgeResult.swift
 struct EdgePoint: Sendable {
     let x: Int32
     let y: Int32
@@ -359,152 +314,260 @@ struct EdgeContour: Sendable {
     let points: [EdgePoint]
 }
 
-struct EdgeDetectionResult: Sendable {
-    let frameIndex: UInt64
-    let contours: [EdgeContour]
+struct EdgeResult: Sendable {
+    let status:          imagingcore.EdgeStatus
+    let contours:        [EdgeContour]
+    let framePTS:        Int64    // presentationTimeNs for frame alignment
     let processingTimeMs: Double
-    let frameTimestampNs: Int64  // sensor timestamp for frame alignment
+
+    init(from cxx: imagingcore.EdgeResult) {
+        status = cxx.status
+        framePTS = cxx.framePTS
+        processingTimeMs = cxx.processingTimeMs
+        contours = (0..<Int(cxx.contourCount)).map { i in
+            let c = cxx.contours[i]
+            return EdgeContour(points: (0..<Int(c.count)).map { j in
+                EdgePoint(x: c.points[j].x, y: c.points[j].y)
+            })
+        }
+    }
 }
 ```
 
+Since all fields are value types conforming to `Sendable`, `EdgeResult` crosses
+actor boundaries freely (`@MLProcessor` → `@MainActor`).
+
 ---
 
-## ObjC++ Bridge
+## Swift-C++ Interop Assessment for OpenCV
 
-```objc
-// File: Consumers/EdgeDetectionBridge.h
-#import <Foundation/Foundation.h>
+Swift 6.2+ with `.interoperabilityMode(.Cxx)` and `cxxLanguageStandard: .cxx20`
+supports direct import of:
+- Plain POD types, structs, non-template classes
+- `SWIFT_SHARED_REFERENCE`-annotated refcounted classes
+- Basic enum classes and C-ABI function pointers
 
-NS_ASSUME_NONNULL_BEGIN
+OpenCV's `cv::Mat`, `cv::InputArray`, and the heavy template headers remain
+problematic for the Clang module importer. **But this only matters if Swift
+imports OpenCV headers.** Under this design, **Swift never imports `<opencv2/*>`.**
+OpenCV is fully encapsulated as a private implementation detail inside
+`Sources/ImagingCore/src/*.cpp`. The public headers under
+`Sources/ImagingCore/include/imagingcore/` contain only POD, SWIFT_SHARED_REFERENCE
+classes, and C-ABI callback typedefs — exactly what Swift 6.2+ direct interop handles.
 
-@interface FramePacket : NSObject
-@property (nonatomic, assign) CVPixelBufferRef pixelBuffer;
-@property (nonatomic, assign) uint64_t frameIndex;
-@property (nonatomic, assign) int64_t captureTimestamp;
-@end
+**Exception discipline is load-bearing.** An uncaught C++ exception crossing into
+Swift aborts the process. Every method in `EdgeDetector.cpp` wraps `cv::` calls in:
 
-typedef void (^EdgeResultCallback)(NSArray<NSArray<NSValue *> *> *contours,
-                                   uint64_t frameIndex,
-                                   double processingTimeMs);
-
-@interface EdgeDetectionBridge : NSObject
-- (instancetype)initWithResultCallback:(EdgeResultCallback)callback;
-- (void)processFrame:(FramePacket *)packet;
-- (void)setLowThreshold:(double)low highThreshold:(double)high;
-@end
-
-NS_ASSUME_NONNULL_END
+```cpp
+try { ... }
+catch (const cv::Exception& e) { /* log, return */ }
+catch (const std::exception& e) { /* log, return */ }
+catch (...) { /* log, return */ }
 ```
+
+This is enforced by code review. There are no `noexcept` qualifiers on private `.cpp`
+methods that call OpenCV — the try/catch is load-bearing instead.
+
+---
+
+## OpenCV iOS Framework Setup
+
+### Chosen Distribution: SwiftPM `binaryTarget` wrapping `opencv2.xcframework`
+
+**Chosen:** Official `opencv2.xcframework` from opencv.org releases, wrapped as
+a SwiftPM `binaryTarget` in `Package.swift`. `ImagingCore` depends on the
+binary target. Alternatives considered: CocoaPods (deprecated trajectory), hand-wired
+`.xcconfig` HEADER_SEARCH_PATHS (bypasses SwiftPM graph), build from source via CMake
+(maximum control, ~30–50 MB vs 80–120 MB prebuilt — worth revisiting if binary size
+is a release blocker).
+
+**Chosen because:** SwiftPM `binaryTarget` is declarative, has no `.xcconfig` files,
+and automatically selects the correct slice for device vs simulator.
+
+### Integration (SwiftPM)
+
+```swift
+// Package.swift — relevant fragments
+
+let package = Package(
+    name: "CamPlugin",
+    platforms: [.iOS(.v26)],
+    targets: [
+        // OpenCV as a SwiftPM binary target.
+        .binaryTarget(
+            name: "opencv2",
+            path: "Frameworks/opencv2.xcframework"
+        ),
+
+        // Pure-C++ core. Apple-free public headers. OpenCV is private.
+        .target(
+            name: "ImagingCore",
+            dependencies: ["opencv2"],
+            path: "Sources/ImagingCore",
+            publicHeadersPath: "include",
+            cxxSettings: [
+                .headerSearchPath("include"),
+                .define("OPENCV_PRIVATE", to: "1"),
+            ]
+        ),
+
+        // Swift facade: imports ImagingCore via direct C++ interop.
+        // Also imports Metal (for texture handoff).
+        .target(
+            name: "Interop",
+            dependencies: ["ImagingCore"],
+            path: "Sources/Interop",
+            swiftSettings: [
+                .interoperabilityMode(.Cxx),
+            ]
+        ),
+
+        .target(name: "CaptureKit",  dependencies: []),
+        .target(name: "PipelineKit", dependencies: ["Interop"]),
+        .target(name: "EncoderKit",  dependencies: []),
+        .target(name: "EvaCore",     dependencies: ["CaptureKit", "PipelineKit", "EncoderKit"],
+                swiftSettings: [.enableExperimentalFeature("DefaultIsolation(MainActor)")]),
+        .target(name: "EvaApp",      dependencies: ["EvaCore"]),
+        .target(name: "TestingSupport", dependencies: []),
+    ],
+    cxxLanguageStandard: .cxx20
+)
+```
+
+The `OPENCV_PRIVATE` define is a belt-and-suspenders signal used by include guards to
+assert that OpenCV is a private dependency — no public header under `include/imagingcore/`
+may transitively expose it.
+
+### Independent Testability
+
+`ImagingCore` is a standalone SwiftPM library target with no Apple-framework
+dependencies in its public headers. `ImagingCoreTests` can run `EdgeDetector`
+against in-memory IOSurface fixture buffers via `swift test` on the macOS host —
+no Metal, no AVFoundation, no camera required. The test target creates an IOSurface,
+writes synthetic RGBA16F pixel data into it, calls through `PixelSink::publish`, and
+asserts the resulting `EdgeResult` matches expected contour output.
+
+---
+
+## Edge Overlay Display (MTKView — not SwiftUI Canvas)
+
+EdgeDetector composites its output directly onto a pre-allocated shared `MTLTexture`
+(640×480, `.shared` storage mode). The Swift side renders this texture via an `MTKView`
+in `EvaCore`, not a SwiftUI `Canvas`.
+
+**Why not SwiftUI Canvas:** Canvas renders contour paths by iterating the `EdgeResult.contours`
+array on `@MainActor` — this is fast for a few dozen contours but degrades with complex
+scenes. Writing the composited texture directly in C++ and rendering it as a GPU quad is
+more consistent and mirrors the future multi-overlay architecture.
+
+```swift
+// File: Sources/EvaCore/Views/EdgeOverlayView.swift
+import SwiftUI
+import MetalKit
+
+// MTKView that renders the EdgeDetector's shared composited texture.
+struct EdgeOverlayView: UIViewRepresentable {
+    let texture: MTLTexture   // Shared .shared-storage texture from EdgeDetector
+
+    func makeUIView(context: Context) -> MTKView {
+        let view = MTKView()
+        view.device = MTLCreateSystemDefaultDevice()
+        view.delegate = context.coordinator
+        view.framebufferOnly = false
+        view.colorPixelFormat = .bgra10_xr
+        return view
+    }
+
+    func updateUIView(_ uiView: MTKView, context: Context) {}
+
+    func makeCoordinator() -> EdgeOverlayRenderer {
+        EdgeOverlayRenderer(texture: texture)
+    }
+}
+
+// MTKViewDelegate that blits the shared texture with a pan/zoom matrix uniform.
+final class EdgeOverlayRenderer: NSObject, MTKViewDelegate {
+    private let texture: MTLTexture
+    private let commandQueue: MTLCommandQueue
+    private let renderPipeline: MTLRenderPipelineState
+    // Pan/zoom matrix updated from gesture recognizers on @MainActor
+    var transformMatrix: simd_float4x4 = matrix_identity_float4x4
+
+    init(texture: MTLTexture) {
+        self.texture = texture
+        let device = texture.device
+        commandQueue = device.makeCommandQueue()!
+        // Full-screen quad pipeline sampling `texture` with pan/zoom matrix
+        // ...
+        super.init()
+    }
+
+    func draw(in view: MTKView) {
+        // Render fullscreen quad sampling `texture` with `transformMatrix`
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+}
+```
+
+Mipmap levels on the shared texture provide filtering quality when zoomed out. The
+overlay resolution is 640×480 — the edge overlay shows processed edges, not the raw feed.
 
 ---
 
 ## Thread Transitions
 
 ```
-AVFoundation capture queue
-  → CameraEngine actor (await processFrame)
-      → Metal compute (synchronous in actor)
-      → commandBuffer.completedHandler (Metal internal thread)
-          → Task { await engine.onFrameReadbackComplete }
-              → CameraEngine actor (dispatch to ConsumerRegistry)
-                  → ConsumerRegistry actor (non-blocking yield)
-                      → Consumer DispatchQueue (own thread)
-                          → EdgeDetectionBridge.processFrame (ObjC++)
-                              → cv::Canny (on consumer thread)
-                                  → EdgeResultCallback
-                                      → Task { await MLProcessor.shared.handle(result) }
-                                          → @MLProcessor actor
-                                              → Task { @MainActor viewModel.edgeResult = result }
-                                                  → @MainActor CameraViewModel
-                                                      → SwiftUI re-render (EdgeDetectionOverlay)
+AVFoundation delivery queue
+  → FramePipeline (nonisolated, runs on delivery queue)
+      → commandBuffer.addCompletedHandler (Metal internal thread)
+          → PixelSink::publish(.tracker, frame)  [non-blocking C++ call]
+              → PixelSink MPSC lane (C++ pool thread)
+                  → EdgeDetector callback on PixelSink frame
+                      → IOSurfaceLock / cv::Mat alias / cv::Canny / cv::findContours
+                      → Composite onto shared MTLTexture
+                      → IOSurfaceUnlock
+                      → edgeResultCallback (C-ABI, pool thread)
+                          → Task { await MLProcessor.shared.handle(result) }
+                              → @MLProcessor actor
+                                  → Task { @MainActor viewModel.edgeResult = result }
+                                      → @MainActor CameraControlViewModel
+                                          → EdgeOverlayView re-render (MTKView)
 ```
 
 **Key isolation boundaries:**
-- `CameraEngine` → `ConsumerRegistry`: actor-to-actor (async call)
-- `ConsumerRegistry` → consumer queue: actor → `DispatchQueue` (non-blocking)
-- Consumer thread → `@MLProcessor`: raw thread → Swift global actor (via `Task { await ... }`)
+- `FramePipeline` → `PixelSink::publish`: synchronous C++ call, no Swift actor hop
+- `PixelSink` pool thread → EdgeDetector: C++ internal, no Swift involvement
+- EdgeDetector C-ABI callback → `@MLProcessor`: pool thread → Swift global actor (via `Task`)
 - `@MLProcessor` → `@MainActor`: global actor → main actor (via `Task { @MainActor ... }`)
 
----
-
-## SwiftUI Overlay for Edge Detection Results
-
-```swift
-// File: UI/EdgeDetectionOverlay.swift
-
-struct EdgeDetectionOverlay: View {
-    let result: EdgeDetectionResult?
-    let frameSize: CGSize
-
-    var body: some View {
-        Canvas { context, size in
-            guard let result else { return }
-            let scaleX = size.width / frameSize.width
-            let scaleY = size.height / frameSize.height
-
-            for contour in result.contours {
-                guard contour.points.count >= 2 else { continue }
-                var path = Path()
-                let first = contour.points[0]
-                path.move(to: CGPoint(
-                    x: CGFloat(first.x) * scaleX,
-                    y: CGFloat(first.y) * scaleY
-                ))
-                for point in contour.points.dropFirst() {
-                    path.addLine(to: CGPoint(
-                        x: CGFloat(point.x) * scaleX,
-                        y: CGFloat(point.y) * scaleY
-                    ))
-                }
-                context.stroke(path, with: .color(.green), lineWidth: 1)
-            }
-        }
-        .allowsHitTesting(false)  // Overlay is non-interactive
-    }
-}
-```
+**Nothing on the 30 Hz frame clock hops a Swift actor boundary.**
 
 ---
 
-## `os_signpost` on Return Path
+## `os_signpost` on EdgeDetector Processing
+
+`os_signpost` is Apple-only, so it lives in `Interop` (Swift), not inside `ImagingCore`.
+The signpost wraps the `edgeResultCallback` invocation observed from Swift:
 
 ```swift
-// MLProcessor.swift
+// File: Sources/Interop/MLProcessor.swift
 @globalActor
 actor MLProcessor {
     static let shared = MLProcessor()
-    private let log = OSLog(subsystem: "com.camplugin.ml", category: .pointsOfInterest)
+    private let log = OSLog(subsystem: "com.camplugin.imaging", category: .pointsOfInterest)
 
-    func handle(_ result: EdgeDetectionResult) async {
+    func handle(_ result: EdgeResult) async {
         os_signpost(.begin, log: log, name: "EdgeResultToUI",
-                    "frameIndex: %llu", result.frameIndex)
+                    "framePTS: %lld", result.framePTS)
         await MainActor.run {
-            // Update CameraViewModel.edgeResult
+            // Update CameraControlViewModel.edgeResult
         }
         os_signpost(.end, log: log, name: "EdgeResultToUI")
     }
 }
 ```
 
-Instruments will show the `EdgeResultToUI` interval spanning from C++ result delivery to `@MainActor` update completion. Target: < 5ms (well within the 33ms frame budget).
-
----
-
-## `os_signpost` on Consumer Processing
-
-```objc
-// EdgeDetectionBridge.mm
-#include <os/signpost.h>
-
-- (void)processFrame:(FramePacket *)packet {
-    os_signpost_id_t signpostID = os_signpost_id_generate(self.log);
-    os_signpost_interval_begin(self.log, signpostID, "EdgeDetection",
-                               "frameIndex: %llu", packet.frameIndex);
-    
-    // ... cv::Canny ...
-    
-    os_signpost_interval_end(self.log, signpostID, "EdgeDetection");
-}
-```
-
-Target processing time: < 16ms per frame (to allow frame-rate-paced processing at 30fps on fast consumer; slow consumer drops frames gracefully via 1-slot mailbox).
+Target: `EdgeResultToUI` interval < 5ms (well within the 33ms frame budget).
+`processingTimeMs` in `EdgeResult` carries the C++ processing time for Instruments
+correlation.
