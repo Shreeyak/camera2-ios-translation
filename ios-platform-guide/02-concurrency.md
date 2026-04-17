@@ -82,16 +82,23 @@ import Atomics  // swift-atomics
 
 let gpuSubmissionEnabled = ManagedAtomic<Bool>(true)
 
-// In the capture delegate, immediately before commit:
+// In the capture delegate, AFTER C++/CV work and consumer yield,
+// immediately before commit:
+cvPipeline.process(frame)                  // runs regardless of gate
+consumerStream.yield(detectionResult)      // async consumers keep flowing
+
 guard gpuSubmissionEnabled.load(ordering: .acquiring) else {
-    return  // drop the frame, release CVPixelBuffer
+    return  // skip Metal encode + commit + present; release CVPixelBuffer
 }
 commandBuffer.commit()
 lastCommittedCommandBuffer = commandBuffer
 ```
 
 The gate check must be **after** CPU-side work and **immediately before** `commit()` —
-that is the guarded operation.
+that is the guarded operation. **The gate does not silence async consumers.**
+C++/CV pipelines and `AsyncStream` yields run regardless; only the Metal encode +
+commit + present path is skipped. During `.inactive` (notification banner, call UI),
+detections keep arriving at the view model — only the preview render pauses.
 
 **2. Ensure in-flight work is scheduled** (not completed — scheduled). Already-committed
 command buffers run to completion even if the app backgrounds; uncommitted ones

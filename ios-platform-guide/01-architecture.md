@@ -84,6 +84,48 @@ Note: the `AVCaptureSession` itself must be driven from a dedicated serial `Disp
 not from inside the actor directly — see `ADR-07`. The engine actor *coordinates* with
 that queue; it does not *replace* it.
 
+### Principle: one actor per lifecycle
+
+`CameraEngine` has one lifecycle — start camera → run → stop. Anything with a
+*different* lifecycle (stitching state, file I/O for captures, ML model loading and
+warmup) belongs in its own actor consuming from a Sendable `AsyncStream`. Cite this
+principle when deciding whether a new responsibility collapses into the engine or
+splits out. The failure mode is the god-object engine that owns three lifecycles
+and races on teardown.
+
+### Forbidden: the `Task { await engine.process(...) }` frame hop
+
+The naive Swift 6 shape for a sync delegate calling into an actor is:
+
+```swift
+// ❌ DO NOT DO THIS
+func captureOutput(_ output: AVCaptureOutput,
+                   didOutput sampleBuffer: CMSampleBuffer,
+                   from connection: AVCaptureConnection) {
+    Task { [engine] in
+        await engine?.process(sampleBuffer)   // one Task allocated per frame
+    }
+}
+```
+
+Three concrete failures:
+
+1. **Lost capture-order ordering.** Detaching to a `Task` means two frames can be
+   in flight into the actor simultaneously; the actor serializes them but the
+   order is no longer guaranteed to match capture order under contention. Drift
+   correction and any temporal algorithm silently misbehaves.
+2. **Per-frame Task allocation** at 30–60fps is measurable overhead with no benefit.
+3. **`CMSampleBuffer` / `CVPixelBuffer` retention across the hop drains AVFoundation's
+   finite buffer pool.** If Tasks back up (main-thread stalls, thermal throttling),
+   capture stalls hard.
+
+The correct shape: the delegate runs on the delivery `DispatchQueue`, is
+`nonisolated`, and does *all* per-frame work inline — lock base address, wrap in
+`cv::Mat`, invoke C++, encode Metal passes, commit. The actor is touched only for
+state changes that are not per-frame (open / close / setResolution). See the
+per-frame command graph below and `02-concurrency.md §The frame clock never hops a
+Swift actor boundary`.
+
 ---
 
 ## ADR-03: Direct GPU outputs vs async consumers
