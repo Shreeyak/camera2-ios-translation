@@ -1,0 +1,113 @@
+# Changelog
+
+Changes to `ios-platform-guide/`. Dates are when the change landed on `main`.
+
+## 2026-04-17
+
+### Added
+- **ADR-18 — Frame set publication (`FrameSet`).** New section in `05-interop.md`.
+  Consumer lane mailboxes carry an atomic `FrameSet` with three IOSurface-backed
+  `CVPixelBuffer` refs (natural full-res, processed full-res, tracker downsampled),
+  `frameNumber`, `captureTime`, `CaptureMetadata` (ISO, exposure, WB gains + mode,
+  lens position, focus mode, exposure mode, zoom, camera position), `ProcessingMetadata`
+  (crop rect, brightness, contrast, saturation, gamma, WB gains applied in shader),
+  and Sendable tracker signals (`blurScore`, `trackerQuality`). Single atomic-swap
+  publication — all three sink refs are always correlated to the same frame.
+- **ADR-19 — Pool sizing, latest-wins mailboxes, observability.** New section
+  in `05-interop.md`. Three per-frame-type `CVPixelBufferPool`s (natural, processed,
+  tracker — all IOSurface-backed, Metal-compatible) with `minimumBufferCount=3`,
+  `maximumBufferAge=1.0s`. Cap formula `N_active_lanes + 1` (the `+1` is the
+  always-empty GPU write slot). Per-lane counters: `frames_produced`,
+  `frames_delivered`, `dropped_mailbox_overwrite`, `hold_over_budget`. Global:
+  `pool_exhaustion`, `pool_current_size`. All-frames-bounded policy explicitly
+  unsupported.
+- **ADR-02 — "One actor per lifecycle" principle.** Added as a named subsection
+  in `01-architecture.md` so design docs can cite it when splitting work into
+  additional actors (stitching, file I/O, ML).
+- **ADR-02 — Forbidden `Task { await engine.process(...) }` frame hop.**
+  Explicit anti-pattern block with the three failure modes (lost capture-order
+  ordering, per-frame Task allocation, `CMSampleBuffer`/`CVPixelBuffer` pool
+  drain).
+
+### Changed
+- **ADR-06 — "blit" → "compute pass."** `MTLBlitCommandEncoder` retitled/rewritten
+  to `MTLComputeCommandEncoder` performing RGBA16F → NV12 conversion (BT.709
+  RGB→YCbCr matrix, half-float → 8-bit quantization, 2×2 chroma downsample
+  directly into the encoder-pool `CVPixelBuffer`). Blit cannot do matrix math,
+  precision conversion, or subsampling. Affects `03-metal.md` (ADR-06 body),
+  `01-architecture.md` (ADR-03 sink table, "Extending the baseline" recording
+  entry), and `README.md` (ADR index row).
+- **ADR-09 — GPU submission gate scope clarified.** Snippet in `02-concurrency.md`
+  now shows CV work + `AsyncStream` yields running *before* the gate, with
+  explicit prose: "the gate does not silence async consumers." Only the Metal
+  encode + commit + present path is gated during `.inactive`; detections keep
+  arriving at the view model through notification banners and other transient
+  system UI.
+- **ADR-18 — `FrameSet` IOSurface-backing made explicit.** Struct comments and
+  surrounding prose now state that both `CVPixelBuffer` refs are IOSurface-backed
+  (from pools configured with `kCVPixelBufferIOSurfacePropertiesKey`) and that
+  `FrameSet` is a handoff of IOSurface refs, not a copy of pixels. Added the
+  `CVPixelBufferGetIOSurface()` retrieval pattern for C++ consumers.
+- **Per-frame command graph** (`01-architecture.md`): final step updated from
+  "publish IOSurface refs to async consumers (see ADR-13)" to "publish
+  `FrameSet` to each subscribed lane's mailbox (see ADR-18, ADR-19)".
+
+### Index
+- `README.md` ADR index gained rows for ADR-18 and ADR-19; ADR-06 row updated
+  to reflect compute-pass terminology.
+
+---
+
+### Round 2 (same date — design review corrections)
+
+#### Added
+- **ADR-13 — Per-`PixelSink` observability requirement.** Every C++ `PixelSink`
+  consumer (including `StreamId::Tracker`) must expose a
+  `std::atomic<uint64_t> mailbox_overwrite_count` published to Swift via C-ABI
+  metrics callback and folded into `FrameDeliveryStats`. Absence of this counter
+  for any consumer is a quality gate failure. Mirrors the Swift-side
+  `dropped_mailbox_overwrite` discipline — a pool exhaustion counter exists for
+  the recorder; the same standard now applies to every PixelSink.
+- **ADR-19 — C++ PixelSink counters in `FrameDeliveryStats`.** Per-consumer C++
+  overwrite counts surfaced alongside Swift-lane counters in the same stream.
+  `frames_produced != frames_delivered` is a visible error for all lanes, including
+  C++ consumers.
+- **`04-avfoundation.md` — `lockForConfiguration` invariant block.** Rewritten
+  with explicit crash consequence: omitting the lock raises `NSGenericException`
+  on device and passes silently in Simulator (highest-risk first-launch crash for
+  camera apps). Rules added: `defer { device.unlockForConfiguration() }` placed
+  immediately after `try` (not at function end); ISO and exposure duration are a
+  coupled commit via `setExposureModeCustom(duration:iso:completionHandler:)` —
+  `device.iso` and `device.exposureDuration` are read-only observation properties.
+  All device mutations run on `sessionQueue`.
+
+#### Changed
+- **ADR-03 — Processed preview MTKView removed from direct GPU outputs.**
+  `processedTex` has no display MTKView. It feeds the video encoder, still capture
+  readback, and the async consumer subscription system only. The two display panes
+  are: (1) natural MTKView (direct GPU blit from `naturalTex` on the frame clock),
+  (2) canny MTKView (async C++ driven — see below). Removed the "Processed preview"
+  row from the direct GPU outputs table.
+- **ADR-03 — Canny preview MTKView documented as async C++ output.** C++ edge
+  detection consumer receives `FrameSet.tracker`, runs `cv::Canny`, composites the
+  edge mask onto the full-res source image (Agent 3 decides natural vs processed),
+  writes the composited RGBA into a pre-allocated IOSurface-backed `MTLTexture`
+  (allocated once at engine setup, full-res, mip-levels configured, reused each
+  frame) via `IOSurfaceLock`/`memcpy`/`IOSurfaceUnlock`. A C-ABI write-complete
+  callback triggers a Swift Metal blit pass (`generateMipmaps(for:)`). The canny
+  `MTKView` renders the mipmapped shared texture with pan/zoom uniforms. Render
+  rate matches Canny throughput, not the 30Hz frame clock.
+- **Per-frame command graph — Pass 3 scope reduced.** Pass 3 now blits only
+  `naturalTex → naturalMTKView`. `processedTex → processedMTKView` removed.
+  Async canny path added after the GPU completion handler to show the full pipeline.
+- **ADR-18 — Tracker stream description corrected.** "480p center-crop" replaced
+  everywhere with "downsampled from `processedTex`, aspect ratio preserved; target
+  height ~480p, width = `processedTex.width` × (480 / `processedTex.height`)."
+  Tracker is a full-frame downsample of processed, not a spatial crop.
+- **`README.md` — ADR-18 row updated** to reflect FrameSet (was FramePair) with
+  all three sinks and full metadata.
+
+#### Fixed
+- Removed all "center-crop" language from tracker stream descriptions throughout.
+- Removed SwiftUI overlay as the canny rendering path (C++ writes the shared texture
+  directly; no Sendable result crosses to Swift for rendering).

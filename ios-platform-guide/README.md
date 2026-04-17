@@ -38,7 +38,7 @@ cite these by ID (e.g. "per `ADR-06`" in `design/03-metal-pipeline.md`).
 | ADR-03 | Distinguish direct GPU outputs from async consumers | 01 |
 | ADR-04 | One `CVMetalTextureCache`, created once, flushed on memory warning | 03 |
 | ADR-05 | Working format `rgba16Float` for multi-stage color pipelines | 03 |
-| ADR-06 | GPU→encoder via IOSurface-backed `CVPixelBufferPool` + `MTLBlitCommandEncoder` | 03 |
+| ADR-06 | GPU→encoder via IOSurface-backed `CVPixelBufferPool` + compute pass (RGBA16F→NV12) | 03 |
 | ADR-07 | Dedicated serial queue for `AVCaptureSession`, not `@MainActor` or the engine actor | 02, 04 |
 | ADR-08 | scenePhase: `.background` stops session; `.inactive` gates GPU submission | 02 |
 | ADR-09 | Metal background rule: atomic submission gate + `waitUntilScheduled()` | 02 |
@@ -50,6 +50,8 @@ cite these by ID (e.g. "per `ADR-06`" in `design/03-metal-pipeline.md`).
 | ADR-15 | `CVMetalTextureGetTexture` can return nil on success — always nil-check | 03, 06 |
 | ADR-16 | `AVAssetWriter` + `InputPixelBufferAdaptor` for Metal recording (not `MovieFileOutput`) | 03 |
 | ADR-17 | Orientation via `AVCaptureConnection.videoRotationAngle` (not shader UV transform) | 04 |
+| ADR-18 | Frame set publication: one atomic `FrameSet` carries natural + processed + tracker IOSurface refs, capture metadata, processing metadata, and tracker signals | 05 |
+| ADR-19 | Pool sizing (`N+1`), latest-wins mailboxes, per-lane drop counters | 05 |
 
 ## Gotchas Index (G-##)
 

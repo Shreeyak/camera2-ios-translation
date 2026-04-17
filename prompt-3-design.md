@@ -126,7 +126,7 @@ The edge detection consumer validates the full integration path end-to-end:
 - OpenCV iOS is correctly linked and callable from C++ consumer code
 - The consumer registration pattern works (register → receive frames → process → unregister)
 - The zero-copy frame bridge is correct (`CVPixelBuffer` → `cv::Mat` via `CVPixelBufferGetBaseAddress`)
-- Sendable result types flow from C++ back to a SwiftUI overlay
+- C++ can composite an edge mask onto a full-res image, write the composited result into a pre-allocated shared MTLTexture, and the resulting mipmapped texture drives a Metal render pass into an MTKView with pan/zoom
 
 REQUIRED DESIGN FOR `design/04-opencv-integration.md`:
 
@@ -150,13 +150,27 @@ CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
 
 **Edge detection consumer:**
 - Implements the generic interface
-- Runs `cv::Canny` (or equivalent) on the `cv::Mat`
-- Returns a result: binary edge mask OR edge contour list — choose one, justify in `design/06-decisions-log.md`
+- Runs `cv::Canny` (or equivalent) on a zero-copy `cv::Mat` wrapping `FrameSet.tracker`
+  (tracker is 480p downsampled from processedTex — edge detection runs at tracker resolution)
+- Composites the edge mask on top of the full-res source image (Agent 3 chooses natural or
+  processed from `FrameSet`; justify in `design/06-decisions-log.md`): reads full-res pixels
+  via `CVPixelBufferLockBaseAddress`, overlays scaled edge pixels, produces composited RGBA
+- Writes composited result into the **pre-allocated shared `MTLTexture`** via
+  `IOSurfaceLock` / `memcpy` / `IOSurfaceUnlock` on its backing IOSurface. The shared
+  texture is allocated once at engine setup (full-res, mip-levels configured,
+  `MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget`) and reused every frame.
+- Fires a C-ABI write-complete callback to Swift; Swift runs a Metal blit pass to call
+  `generateMipmaps(for: sharedTexture)` before the MTKView next draws
+- There is NO Sendable result struct crossing to Swift/SwiftUI; rendering is driven by C++
+  writing to the shared texture and the subsequent mipmap + render pass
 
-**Result return path:**
-- C++ result type → Sendable Swift struct (e.g., `EdgeDetectionResult: Sendable`)
-- Thread transition: C++ consumer queue → `@MLProcessor` actor → `@MainActor` ViewModel
-- SwiftUI overlay: render edge result as an overlay on the Metal preview
+**Canny MTKView render:**
+- Dedicated `MTKView` for the canny pane (second preview pane)
+- Metal render shader samples the mipmapped shared texture and applies pan/zoom transform
+  (viewport origin + scale) passed as uniforms
+- Pan/zoom gesture state is managed in the Swift ViewModel and passed as uniforms each draw
+- Render rate is asynchronous — matches Canny throughput, not the 30Hz frame clock; the
+  natural preview runs at full frame rate independently
 
 **OpenCV iOS framework setup:**
 - Evaluate: CocoaPods, SPM, or xcframework — choose one, justify in `design/06-decisions-log.md`
@@ -198,8 +212,16 @@ Write `design/01-architecture.md`:
 - Sandwich pattern applied to this specific system (camera engine + Metal pipeline + C++ consumers)
 - Module/layer diagram (Mermaid, max ~12 nodes)
 - Layer responsibilities and communication contracts
-- Frame delivery data flow: capture callback → Metal pipeline → MTKView + C++ consumers
-- Results return path: C++ consumer → Swift actor → `@MainActor` ViewModel → SwiftUI overlay
+- Frame delivery data flow: capture callback → Metal pipeline → 3 named sinks → `FrameSet`
+  → MTKView display preview (direct) + async consumers. The three sinks are:
+  **natural** (full-res RGBA16F, crop only), **processed** (full-res RGBA16F, crop + color ops),
+  **tracker** (RGBA16F, downsampled from processedTex with aspect ratio preserved, target
+  height ~480p). Each sink must support N async consumers via `FrameSet` lanes (ADR-18/19).
+  The MTKView display blits from the same IOSurfaces as the consumer refs — document both paths.
+- Results return path for rendering consumers (e.g. canny): C++ consumer → writes edge mask
+  to IOSurface-backed MTLTexture → Metal render into canny MTKView (no Swift actor hop needed
+  for the render path). For consumers that return data to the UI (future use): C++ consumer →
+  Sendable result struct → `@MainActor` ViewModel → SwiftUI
 
 ---
 
@@ -256,11 +278,19 @@ Write `design/04-opencv-integration.md`:
 - Swift-C++ interop assessment for OpenCV iOS headers
 - OpenCV iOS framework setup (CocoaPods / SPM / xcframework — pick one, justify)
 - Zero-copy handoff pattern with specific API calls (`CVPixelBufferLockBaseAddress` → `cv::Mat`)
-- Edge detection consumer implementation design
-- Result type: `EdgeDetectionResult: Sendable` (or equivalent)
-- Thread transitions at each step: camera queue → C++ consumer → Swift actor → `@MainActor`
-- SwiftUI overlay for result rendering
-- `os_signpost` telemetry on the return path (from consumer completion to UI update)
+- Edge detection consumer implementation design:
+  - `cv::Canny` on zero-copy `cv::Mat` from `FrameSet.tracker` (480p downsampled processed)
+  - Composites edge mask onto full-res source image in C++ (Agent 3 decides natural vs processed)
+  - Writes composited RGBA into pre-allocated shared `MTLTexture` via IOSurface lock/memcpy/unlock
+    (texture allocated once at engine setup: full-res, mip-levels, no per-frame allocation)
+  - C-ABI write-complete callback → Swift Metal blit: `generateMipmaps(for: sharedTexture)`
+  - Canny MTKView samples mipmapped shared texture with pan/zoom uniforms; pan/zoom gesture
+    state managed in Swift ViewModel
+  - No Sendable result struct crosses the boundary; C++ drives render content via shared texture
+- Thread model: camera delivery queue → C++ consumer queue (async, drop-on-busy) →
+  C-ABI callback → Swift blit queue → MTKView draw
+- `os_signpost` telemetry: consumer callback entry → Canny complete → composite complete →
+  IOSurface write complete → mipmap blit complete → MTKView drawable presented
 
 ---
 
@@ -288,8 +318,15 @@ File tree: [REQUIRED — list every Swift file introduced in this phase, includi
 - UI control surface (sliders or buttons per control type)
 - Capability querying per device (not all devices support all controls)
 - Control interaction constraints (e.g., manual exposure disables AE)
+- **Required: every device mutation is wrapped in `lockForConfiguration()` / `unlockForConfiguration()`
+  with `defer { device.unlockForConfiguration() }` placed immediately after the `try`. Omitting
+  the lock raises `NSGenericException` on device (passes silently in Simulator). ISO and exposure
+  duration are a coupled commit — always set together via
+  `setExposureModeCustom(duration:iso:completionHandler:)`; `device.iso` and
+  `device.exposureDuration` are read-only observation properties. All device mutations run on
+  `sessionQueue`, never on `@MainActor`.**
 
-Acceptance criteria: every control adjusts the real camera parameter, ranges are correct per device, control conflicts are handled without crashing, controls survive camera switch.
+Acceptance criteria: every control adjusts the real camera parameter on a physical device (not just Simulator), ranges are correct per device, control conflicts are handled without crashing, controls survive camera switch, no `NSGenericException` on first ISO/exposure change after launch.
 
 File tree: [REQUIRED — include controls model, per-control view components, AVCaptureDevice extension or helper]
 
@@ -307,14 +344,16 @@ File tree: [REQUIRED — include .metal shader files, MetalRenderer, CVMetalText
 **Phase 3 — C++ Integration + OpenCV Edge Detection + Fan-Out**
 - Generic C++ consumer interface (header + build config)
 - OpenCV iOS framework integrated (SPM or CocoaPods or xcframework)
-- Edge detection consumer: `cv::Canny` on zero-copy `cv::Mat`
-- Consumer registered with `CameraEngine`, fan-out to both Metal preview and edge detection simultaneously
-- `AsyncStream` back-pressure, edge results returned to SwiftUI overlay
+- Edge detection consumer: `cv::Canny` on zero-copy `cv::Mat` from `FrameSet.tracker`
+  (downsampled from processedTex — not center-crop; aspect ratio preserved)
+- Consumer registered with `CameraEngine`, receiving `FrameSet` (natural + processed +
+  tracker); fan-out to all sinks simultaneously via the consumer subscription system
+- `AsyncStream` back-pressure, edge results rendered into canny MTKView by C++ (mipmap + pan/zoom)
 - `os_signpost` on result return path
 
-Acceptance criteria: C++ consumer receives frames, memory stays flat under sustained load, slow consumer drops frames without blocking preview, edge detection result rendered in SwiftUI overlay.
+Acceptance criteria: C++ consumer receives frames via tracker lane, memory stays flat under sustained load (shared texture reused, no per-frame allocation), slow consumer drops frames without blocking the natural preview, composited result is pixel-correct (edge pixels overlay the full-res source), canny MTKView renders with correct pan/zoom at all zoom levels (mipmap quality visible), natural preview continues at full frame rate independently.
 
-File tree: [REQUIRED — include C++ consumer interface header, EdgeDetectionConsumer.h/.cpp, bridging header or module map, ConsumerRegistry in Swift, EdgeDetectionResult Sendable struct, SwiftUI overlay view]
+File tree: [REQUIRED — include C++ consumer interface header, EdgeDetectionConsumer.h/.cpp, shared texture allocator (pre-allocated IOSurface-backed MTLTexture), bridging header or module map, ConsumerRegistry in Swift, write-complete C-ABI callback registration, mipmap blit helper (Swift/Metal), canny MTKView wrapper, pan/zoom render shader (.metal)]
 
 **Phase 4 — Performance + Resilience**
 - Frame pacing (triple-buffering or ring buffer strategy)
@@ -329,15 +368,24 @@ Acceptance criteria: latency within budget, no unintended frame drops under norm
 File tree: [REQUIRED — include any new throttling/pacing classes or extensions introduced]
 
 **Phase 5 — Capture + Recording**
-- Still image capture via `AVCapturePhotoOutput` with EXIF metadata
+- Still image capture via **Metal readback from `processedTex`** (Pass 6 in the per-frame
+  graph — blit `processedTex` to a CPU-readable `CVPixelBuffer`). This path captures crop +
+  color ops, matching the processed preview exactly. `AVCapturePhotoOutput` is explicitly
+  rejected: it captures from the sensor, bypassing Metal, and produces an uncropped,
+  unprocessed frame.
+- EXIF metadata attached at save time (GPS, capture timestamp, device info via ImageIO)
 - Photo library authorization integrated with state machine
-- Video recording via `AVAssetWriter` with audio sync
+- Video recording via `AVAssetWriter` — video-only, no audio track (see
+  `ios-platform-guide/04-avfoundation.md` "No-audio as a deliberate constraint")
 - Mid-recording error handling from `domain-revised/08-capture-and-recording.md`
-- Background teardown safety for in-progress recording
+- Background transition: recording stops cleanly on backgrounding via `UIApplication.beginBackgroundTask`
+  drain guard (ADR-16). The recording ends — this is correct behavior, not a loss condition.
+  The concern to guard against is **file corruption** (partial write with no `moov` atom),
+  not continuation of the recording.
 
-Acceptance criteria: EXIF metadata correct, recording clean start/stop, audio synchronized, no data loss on background transition, all domain edge-case guards present.
+Acceptance criteria: still image pixel-accurate to processed preview (crop + color ops applied), EXIF metadata correct, recording starts and stops cleanly, backgrounding during recording produces a complete uncorrupted file up to the point of stop (not a corrupted partial file), all domain edge-case guards present.
 
-File tree: [REQUIRED — include StillCapture controller, VideoRecorder, AVAssetWriter wrapper, AudioSync helper, EXIF writer]
+File tree: [REQUIRED — include StillCapture controller, VideoRecorder, AVAssetWriter wrapper, EXIF writer]
 
 **Phase 6 — Parity + Polish**
 - Feature parity audit against `domain-revised/10-api-contract.md` — every method mapped or marked N/A with justification
@@ -431,11 +479,22 @@ Platform-guide compliance:
 - `CVPixelBuffer` handling is confined to one queue/actor per ADR-10; only `Sendable` results cross actor boundaries.
 - Zero-copy path uses `CVMetalTextureCache` per ADR-04; nil-guard per ADR-15; GPU→encoder uses IOSurface pool per ADR-06.
 - Consumer dispatch is async with drop-on-busy per ADR-13 (never synchronous in the capture delegate).
+- Every C++ `PixelSink` consumer (including the tracker/Canny consumer) exposes a `mailbox_overwrite_count`
+  published into `FrameDeliveryStats` alongside the Swift-side per-lane `dropped_mailbox_overwrite`
+  counters (ADR-13 observability requirement). A tracker consumer with no overwrite counter is a
+  quality gate failure.
+- `FrameSet` carries all three sinks (natural, processed, tracker) per ADR-18; three separate `CVPixelBufferPool`s per ADR-19.
+- Still capture uses Metal readback from `processedTex` (crop + color ops), not `AVCapturePhotoOutput`.
+- Every `AVCaptureDevice` property mutation is wrapped in `try device.lockForConfiguration()` /
+  `defer { device.unlockForConfiguration() }` and runs on `sessionQueue`. ISO and exposure
+  duration are committed together via `setExposureModeCustom(duration:iso:completionHandler:)` —
+  never set separately. Omitting the lock raises `NSGenericException` on device and will not
+  appear in Simulator testing.
 
 Design completeness:
 - Every phase in `design/05-implementation-phases.md` has a concrete file tree (no "[List files here]" placeholders) and testable acceptance criteria
 - Profiling strategy includes `os_signpost` intervals and a frame budget with numerical thresholds
-- OpenCV edge detection consumer is concretely designed: types, zero-copy handoff, thread transitions, result return path
+- OpenCV edge detection consumer is concretely designed: types, zero-copy handoff (`FrameSet.tracker` → `cv::Mat`), C++ compositing onto full-res image, composited result written to pre-allocated shared `MTLTexture` via IOSurface lock, C-ABI write-complete callback, Swift mipmap blit, canny `MTKView` with pan/zoom uniforms, full thread model
 - Generic C++ consumer interface is designed alongside the edge detection consumer
 - `design/08-audit-lookups.md` exists and accurately logs every audit consultation (or states none were needed)
 - Every significant design decision is in `design/06-decisions-log.md` with alternatives considered

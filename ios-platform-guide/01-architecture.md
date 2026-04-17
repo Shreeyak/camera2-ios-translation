@@ -141,13 +141,36 @@ per-frame command buffer.
 
 | Sink | Mechanism |
 |---|---|
-| Processed preview | `MTKView` drawable (composite + overlay) |
-| Natural preview | Second `MTKView` drawable (blit) |
-| Video encoder | `AVAssetWriterInputPixelBufferAdaptor` + IOSurface pool (blit; gated on `isRecording`) — see ADR-06 |
-| Still capture readback | CPU-readable `CVPixelBuffer` (blit; gated on `stillRequested`) |
+| Natural preview | `MTKView` blit from `naturalTex` (on the frame clock) |
+| Video encoder | `AVAssetWriterInputPixelBufferAdaptor` + IOSurface pool (compute; RGBA16F → NV12 conversion; gated on `isRecording`) — see ADR-06 |
+| Still capture readback | CPU-readable `CVPixelBuffer` blit from `processedTex`; gated on `stillRequested` — **not** `AVCapturePhotoOutput`, which bypasses Metal |
 
-All of these see bit-identical pixels from the same `processedTex` in the same command
-buffer (before the next frame touches it).
+The natural MTKView blit draws from the same IOSurface as `FrameSet.natural` — written
+in the same command buffer pass — so display and async consumers are always bit-identical.
+Still capture uses `processedTex` so it captures crop + color ops, matching the processed
+consumer path. `processedTex` has no display MTKView — it feeds recording, still capture,
+and the async consumer subscription system only.
+
+**Canny preview MTKView is NOT a direct GPU output.** It is driven by the async C++
+edge detection consumer:
+
+1. C++ receives `FrameSet.tracker` (480p, downsampled from processedTex).
+2. C++ runs `cv::Canny` on a zero-copy `cv::Mat` → edge mask at tracker resolution.
+3. C++ composites: reads full-res image pixels (from `FrameSet.natural` or `.processed` —
+   Agent 3 decides) and overlays the scaled edge mask on top, producing a composited RGBA
+   image at full resolution.
+4. C++ writes the composited result into a **pre-allocated shared `MTLTexture`**
+   (IOSurface-backed, full-res, mip-levels configured, allocated once at engine setup and
+   reused every frame — no per-frame allocation). Writing is via `IOSurfaceLock` /
+   `memcpy` / `IOSurfaceUnlock` on the backing surface.
+5. Swift side receives a C-ABI callback from C++ signalling write-complete, then runs a
+   Metal blit pass to generate mipmaps on the shared texture.
+6. The canny `MTKView` renders the mipmapped shared texture with pan/zoom uniforms (origin
+   + scale) for quality at any zoom level.
+
+This render is asynchronous — it runs at Canny throughput, not the 30Hz frame clock.
+Latest-wins mailbox ensures the canny MTKView always shows the most recent result without
+blocking the natural preview.
 
 ### Async consumers
 
@@ -176,15 +199,21 @@ CMSampleBuffer (8-bit biplanar YUV from capture)
    ▼
 CVMetalTextureCache → yTex (R8Unorm), cbcrTex (RG8Unorm)  [zero-copy; ADR-04]
    │
+   Dequeue 3 pool buffers before passes run (ADR-18):
+   naturalPoolBuf ← natural pool, processedPoolBuf ← processed pool,
+   trackerPoolBuf ← tracker pool  [gated: consumer subscribed]
+   │
    ▼
 [commandBuffer begin]
 
-Pass 1  compute   crop + YUV8 → RGBA16F → naturalTex        per ADR-05
+Pass 1  compute   crop + YUV8 → RGBA16F → naturalTex (also → naturalPoolBuf)  per ADR-05
                   (BT.709 YUV-to-RGB; crop origin/size as uniforms)
-Pass 2  compute   color transforms → processedTex
-Pass 3  render    naturalTex   → naturalMTKView drawable
-                  processedTex → processedMTKView drawable (+ overlay)
-Pass 4  compute   processedTex → trackerTex (480p)          [gated: consumer subscribed]
+Pass 2  compute   color transforms → processedTex (also → processedPoolBuf)
+Pass 3  blit      naturalTex   → naturalMTKView drawable
+                  (processedTex has no display MTKView; it feeds recording, still capture,
+                  and consumer lanes only)
+Pass 4  compute   processedTex → trackerTex (downsampled, aspect ratio preserved,
+                  target height ~480p) → trackerPoolBuf           [gated: consumer subscribed]
 Pass 5  compute   rgba16f → yuv8 → encoder pool buffer      [gated: recording]
 Pass 6  blit      processedTex → still readback buffer      [gated: still requested]
 
@@ -192,7 +221,17 @@ Pass 6  blit      processedTex → still readback buffer      [gated: still requ
    │
    ▼
 On GPU completion handler:
-   publish IOSurface refs to async consumers (see ADR-13)
+   construct FrameSet{frameNumber, captureTime, natural, processed, tracker,
+                      capture metadata, processing metadata, blurScore, trackerQuality}
+   publish to each subscribed lane's mailbox (see ADR-18, ADR-19)
+   │
+   ▼  (async, on consumer's own queue — NOT on the frame clock)
+C++ edge detection consumer receives FrameSet.tracker:
+   cv::Canny on zero-copy cv::Mat (tracker resolution)
+   composites edge mask on top of full-res source image (natural or processed — Agent 3 decides)
+   writes composited RGBA → pre-allocated shared MTLTexture via IOSurfaceLock/memcpy/Unlock
+   C-ABI callback → Swift triggers Metal blit: generateMipmaps(for: sharedTexture)
+   Metal render pass: mipmapped sharedTexture → cannyMTKView drawable (pan/zoom uniforms)
 ```
 
 **Frame clock rule: nothing on the 30Hz frame clock hops a Swift actor boundary.**
@@ -215,10 +254,12 @@ wrong grayscale with no crash and no error. See G-18.
 - Every intermediate texture is IOSurface-backed (ADR-06). The only copy in steady
   state is whatever the consumer does with the frame (e.g. `cv::cvtColor` into a
   fresh `cv::Mat`).
-- Tracker stream is ~480p for a reason: Canny on full processed resolution
-  (~1.9M px) costs 15–25ms per frame on A16-class hardware; on 480p
-  (~0.3M px) it costs 2–4ms. The downscale is what makes per-frame CV fit the
-  frame budget. Don't run CV on the full-resolution processed stream.
+- Tracker stream is downsampled for a reason: Canny on full processed resolution
+  (~1.9M px) costs 15–25ms per frame on A16-class hardware; at the tracker
+  target height (~480p, ~0.3M px) it costs 2–4ms. The downsample is what makes
+  per-frame CV fit the frame budget. Don't run CV on the full-resolution processed
+  stream. Width is not fixed — it is calculated from processedTex.width × (480 /
+  processedTex.height) to preserve aspect ratio.
 
 ---
 
@@ -231,8 +272,8 @@ real camera product:
   inside `CameraView.swift`. Still one file.
 - **Multiple async consumers:** consumer registry lives inside the engine actor OR
   inside a C++ pool the engine owns. Mechanism in ADR-13.
-- **Recording:** Metal blit pass + `AVAssetWriter` coordination. Stays inside the
-  engine. See ADR-06, ADR-16.
+- **Recording:** Metal compute pass (RGBA16F → NV12 conversion) + `AVAssetWriter`
+  coordination. Stays inside the engine. See ADR-06, ADR-16.
 - **Still capture:** Metal blit pass + CPU readback. Stays inside the engine.
 
 Extensions that need a **domain trigger** before being taken:

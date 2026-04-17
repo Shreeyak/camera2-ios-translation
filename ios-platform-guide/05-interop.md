@@ -134,6 +134,17 @@ delegate is not acceptable.
 - Best when: multiple consumers, may run in parallel, the imaging core is
   independently testable via `swift test`.
 
+**Observability requirement for every `PixelSink` consumer (including tracker):**
+
+Each `PixelSink` consumer MUST expose a `std::atomic<uint64_t> mailbox_overwrite_count`
+that increments each time a new frame overwrites a pending one before the consumer
+pulled it. The thread pool publishes all per-consumer overwrite counts to Swift via a
+C-ABI metrics callback at the same cadence as the Swift-side `FrameDeliveryStats`
+(ADR-19). Absence of this counter for any consumer — including `StreamId::Tracker` —
+is a quality gate failure equivalent to a missing `dropped_mailbox_overwrite` on a
+Swift-side lane. Silent drops are a correctness bug regardless of which mechanism
+delivered them.
+
 **Mechanism B — per-consumer `AsyncStream.bufferingNewest(1)` in Swift.**
 
 - One stream per consumer; engine yields `sending Frame` on frame completion.
@@ -225,3 +236,226 @@ The engine never slows the camera hardware in response to a slow consumer. Drop-
 absorbs the gap. If a consumer is consistently slow (e.g. Canny on full-resolution
 instead of 480p), the fix is to change the input — downscale, strip channels — not
 to introduce a backpressure mechanism.
+
+---
+
+## ADR-18: Frame set publication (`FrameSet`)
+
+ADR-13 specifies *that* consumers are async and drop-on-busy. This ADR specifies
+*what* gets published and *how it's correlated* across all three output sinks.
+
+### Decision
+
+Consumer lane mailboxes carry a `FrameSet` — one atomic unit containing three
+**IOSurface-backed** pixel-buffer refs, full capture metadata, processing metadata,
+and derived tracker signals, covering all three consumer sinks defined by the product.
+
+```swift
+struct FrameSet: Sendable {
+    let frameNumber: UInt64         // monotonically increasing; resets to 0 on engine open()
+    let captureTime: CMTime         // presentation timestamp from CMSampleBuffer
+
+    // IOSurface-backed CVPixelBuffers from their respective pools (see ADR-19).
+    // Each buffer has kCVPixelBufferIOSurfacePropertiesKey set at pool creation.
+    // Zero-copy: the same IOSurface the GPU wrote is what the consumer reads.
+    let natural:   CVPixelBuffer    // full-res RGBA16F; crop only, no color ops
+    let processed: CVPixelBuffer    // full-res RGBA16F; crop + color ops
+    let tracker:   CVPixelBuffer    // RGBA16F; downsampled from processedTex,
+                                    // aspect ratio preserved (target height ~480p,
+                                    // width = processedTex.width × 480 / processedTex.height)
+
+    let capture: CaptureMetadata        // camera hardware settings at capture time
+    let processing: ProcessingMetadata  // Metal pipeline parameters applied to this frame
+
+    // Tracker signals computed in Pass 4 — attached for zero-ambiguity frame correlation
+    let blurScore: Float
+    let trackerQuality: TrackerQuality
+}
+
+/// Camera hardware settings active when this frame was captured.
+struct CaptureMetadata: Sendable {
+    let iso: Float
+    let exposureDuration: CMTime
+    let whiteBalanceGains: WhiteBalanceGains  // hardware gains from AVCaptureDevice
+    let whiteBalanceMode: WhiteBalanceMode    // .auto / .manual / .locked
+    let lensPosition: Float                   // 0.0–1.0 normalized
+    let focusMode: FocusMode                  // .auto / .manual / .locked
+    let exposureMode: ExposureMode            // .auto / .manual / .locked
+    let zoomFactor: CGFloat
+    let cameraPosition: CameraPosition        // .front / .back / .wide
+}
+
+/// Post-processing parameters applied in the Metal pipeline for this frame.
+struct ProcessingMetadata: Sendable {
+    let cropRect: CGRect        // in sensor pixel coordinates
+    let brightness: Float       // applied in Pass 2
+    let contrast: Float
+    let saturation: Float
+    let gamma: Float
+    let whiteBalanceGains: WhiteBalanceGains  // gains applied in the Metal shader
+                                              // (may differ from hardware gains)
+}
+
+// Plain Sendable wrapper — AVCaptureDevice.WhiteBalanceGains is ObjC-imported
+// and not guaranteed Sendable in Swift 6.
+struct WhiteBalanceGains: Sendable { let red: Float; let green: Float; let blue: Float }
+```
+
+**`FrameSet` is a handoff of IOSurface refs, not a copy of pixels.** The
+`CVPixelBuffer` is the Apple-level handle; the `IOSurface` beneath it is the
+cross-process, cross-API GPU memory that VideoToolbox, Metal, and C++ consumers
+can all map without copying. A C++ consumer retrieves the underlying surface via
+`CVPixelBufferGetIOSurface(set.processed)` and holds it for the duration of
+processing; ARC on the `CVPixelBuffer` keeps the surface alive across the hop.
+
+### Three named sinks
+
+The product has three distinct output lanes from the Metal pipeline, each
+supporting N consumers:
+
+| Field | Content | Pool |
+|---|---|---|
+| `natural` | Full-res RGBA16F; crop only, no color ops | natural pool |
+| `processed` | Full-res RGBA16F; crop + color ops | processed pool |
+| `tracker` | RGBA16F; downsampled from processedTex, aspect ratio preserved | tracker pool |
+
+The natural MTKView preview and the processed MTKView preview draw from the same
+IOSurfaces as the consumer lanes — written in the same command buffer pass —
+so display and async consumers are always bit-identical.
+
+### Why one atomic unit, not three independent streams
+
+All three buffer refs originate from the same Metal command buffer. If they lived
+in separate mailboxes, a consumer correlating natural + processed frames could
+observe inconsistent sets (natural of frame N alongside processed of frame N-1)
+because mailbox updates race. Publishing as a single atomic unit makes cross-sink
+correlation impossible to miswire. A consumer that only needs tracker ignores the
+other fields; the marginal cost of always computing all three passes is negligible.
+
+### Publication rules
+
+- All three `CVPixelBuffer`s are pre-dequeued from their respective pools *before*
+  the Metal compute passes run, so all refs are in scope at commit time.
+- The completion handler (still on the delivery queue) constructs the `FrameSet`
+  and performs an atomic swap into each subscribed lane's mailbox. The swap
+  releases the prior set, which releases the underlying `CVPixelBuffer`s when
+  the consumer no longer holds them.
+- `frameNumber` and `captureTime` let the consumer correlate to external streams
+  (IMU, sensor metadata) without depending on clock alignment.
+
+### Non-goals
+
+- **Per-lane shape variation.** Every lane receives the full set. Consumers that
+  don't need all three buffers ignore the unused fields.
+- **Set depth > 1.** See ADR-19; all lanes are latest-wins.
+
+---
+
+## ADR-19: Pool sizing, latest-wins mailboxes, observability
+
+ADR-18 defines the unit of publication. This ADR defines the pool backing the
+`CVPixelBuffer` refs inside that unit, the mailbox policy, and the drop
+accounting.
+
+### Pool configuration
+
+Three `CVPixelBufferPool`s — one per frame type (`natural`, `processed`, `tracker`).
+All IOSurface-backed and Metal-compatible. Same attributes for each:
+
+```swift
+let poolAttrs: [String: Any] = [
+    kCVPixelBufferPoolMinimumBufferCountKey as String: 3,
+    kCVPixelBufferPoolMaximumBufferAgeKey   as String: 1.0,   // seconds
+]
+```
+
+- Minimum 3 covers the common 0–1 active-consumer case (1 current mailbox ref
+  + 1 GPU write slot + 1 slack).
+- CF grows each pool on demand past this minimum and ages buffers out after 1s
+  of disuse. **No explicit grow/shrink code** — trust CF.
+
+### Cap formula
+
+```
+pool cap = N_active_lanes + 1
+```
+
+The `+1` is always-empty — the GPU write slot, so writes never stall waiting for
+a consumer to release a ref (stalling violates preview-inviolable, ADR-13). Each
+latest-wins consumer holds ≤ 1 buffer ref during processing; that's the N term.
+
+The formula is documentation; CF handles allocation at runtime. Use it when
+debugging "pool size keeps growing" symptoms to check whether a consumer is
+leaking refs.
+
+### Mailbox semantics
+
+- Per-lane 1-slot atomic holding the latest `FrameSet`.
+- On publish, the prior set (if any) is released. If the prior set was never
+  pulled by the consumer, increment `dropped_mailbox_overwrite` for that lane.
+- Consumer pulls: retain the set (all three `CVPixelBuffer` refs become consumer-held),
+  process on the consumer's own queue, release when done. CF reclaims buffers
+  whose refcount drops to 1 (pool only).
+
+**All-frames-bounded is not supported for this project.** Every lane is
+latest-wins. If a future consumer needs all-frames semantics (e.g. an
+IMU-correlated stitcher that can't skip), revisit — don't layer it on as an
+option, because mixing policies in one pool makes cap sizing non-local.
+
+### Pool exhaustion
+
+Should not occur under `N + 1` sizing with latest-wins semantics. If
+`CVPixelBufferPoolCreatePixelBuffer` returns
+`kCVReturnWouldExceedAllocationThreshold`:
+
+- GPU drops the frame (no commit that cycle).
+- Increment global `pool_exhaustion` counter.
+- Log a warning identifying the lane with the oldest outstanding ref — the
+  primary suspect for the jam (a consumer holding a ref longer than its frame
+  budget).
+
+### Dynamic subscription
+
+```swift
+// Consumer side
+let stream = engine.subscribe()   // AsyncStream<FrameSet>
+for await set in stream {
+    // process; release at end of loop iteration
+}
+
+// Unsubscribe by terminating the Task that owns the for-await loop.
+```
+
+- `subscribe()` allocates a new lane + mailbox atomically.
+- Pool grows on the next frame that needs a fresh buffer; CF handles this.
+- Unsubscribe releases the lane; CF ages out the unused buffer after 1s.
+
+### Observability
+
+Per-lane counters:
+
+| Counter | Increments on |
+|---|---|
+| `frames_produced` | GPU commit published a pair to this lane |
+| `frames_delivered` | consumer pulled the pair |
+| `dropped_mailbox_overwrite` | new pair replaced an unpulled prior pair |
+| `hold_over_budget` | consumer held a pair > N frame intervals (default 3) |
+
+Global counters:
+
+| Counter | Meaning |
+|---|---|
+| `pool_exhaustion` | pool dequeue returned `kCVReturnWouldExceedAllocationThreshold` |
+| `pool_current_size[pool]` | CF-managed buffer count per pool (diagnostic) |
+
+Surfaced to the view model via a separate `AsyncStream<FrameDeliveryStats>`.
+For analyzer apps, `frames_produced != frames_delivered` is a visible error
+state — surfaced in debug UI, not hidden. Silent drops are a correctness bug.
+
+**C++ PixelSink consumers (Mechanism A) must appear in the same `FrameDeliveryStats`.**
+The per-consumer `mailbox_overwrite_count` from each C++ `PixelSink` (including
+`StreamId::Tracker`) is published via a C-ABI metrics callback and folded into
+`FrameDeliveryStats` alongside the Swift-side per-lane counters. The absence of a
+tracker-lane overwrite counter in `FrameDeliveryStats` is a quality gate failure —
+a pool exhaustion counter exists for the recorder; the same discipline is required
+for every PixelSink consumer.
