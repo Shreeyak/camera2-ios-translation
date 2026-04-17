@@ -414,32 +414,127 @@ suspended mid-drain, the MP4 file is permanently corrupted (moov atom never writ
 
 ## 8. Session interruption and app lifecycle
 
-**Observed events:**
+**Reference:** `design-modified/ios-lifecycle-reference.md` — read that file in full.
+This section is the design decision summary; the reference file has the rationale and code patterns.
 
-- `AVCaptureSession.wasInterruptedNotification` (camera taken by FaceTime, etc.)
-- `AVCaptureSession.interruptionEndedNotification`
-- `UIApplication.didEnterBackgroundNotification` / `.willEnterForegroundNotification`
-- `scenePhase` transitions (`.active` / `.inactive` / `.background`)
+### 8.1 Two orthogonal signal sources — do not conflate
 
-**On any "session going away" event (interrupted OR backgrounded):**
+| Source | Signal | Response |
+|---|---|---|
+| View lifecycle | View appears / disappears | `startRunning()` / `stopRunning()` on sessionQueue |
+| System interruptions | `AVCaptureSessionWasInterrupted` / `InterruptionEnded` | Observe, classify, show UI |
 
-1. If recording: `RecordingActor.stop()` finalizes and migrates the partial .mov
-   to Photos (with `beginBackgroundTask` per section 7.3).
-2. `PipelineKit.teardown()` releases texture caches, pixel buffer pools, shared
-   MTLTexture.
-3. `CaptureActor.stop()` calls `session.stopRunning()`.
-4. `CameraState.status = .interrupted(reason)`.
+**Critical:** do NOT call `stopRunning()` in `didEnterBackground` when `wasInterrupted` has
+already fired for `videoDeviceNotAvailableInBackground`. These race. View lifecycle drives
+start/stop; by the time `didEnterBackground` fires, `viewWillDisappear` has already stopped
+the session cleanly.
 
-**On resume:**
+`AVCaptureSession` is created **once** per `open()`. `startRunning()`/`stopRunning()` toggle it.
+Recreating `AVCaptureSession()` in `viewWillAppear` is the forbidden pattern — full hardware
+re-init latency on every foreground.
 
-1. `CaptureActor.start()` reconfigures session (format, inputs, outputs).
-2. Reapply cached manual settings (ISO, exposure, focus position, WB gains, mode toggles).
-3. `PipelineKit.rebuild()` creates fresh pools + textures.
-4. `session.startRunning()`.
-5. If partial recording was saved during the interruption: `CameraState.pendingAlert
-   = .recordingSaved(url:...)`; the UI shows a modal on first frame.
+All `AVCaptureSession` interaction runs on `CaptureActor` (a Swift actor, serial, off-main).
+`startRunning()` blocks 100–500ms; calling it on `@MainActor` triggers the purple runtime warning.
 
-Brief (~500ms) black frame during rebuild is expected.
+### 8.2 Five interruption reasons and handling policy
+
+| Reason | Response |
+|---|---|
+| `videoDeviceNotAvailableInBackground` | No-op. Await `interruptionEnded`. Auto-resume. |
+| `videoDeviceInUseByAnotherClient` | Show **Resume** button. Await user intent. |
+| `audioDeviceInUseByAnotherClient` | Show **Resume** button. Await user intent. |
+| `videoDeviceNotAvailableWithMultipleForegroundApps` | Show "camera unavailable" label. Cannot be resolved programmatically. |
+| `videoDeviceNotAvailableDueToSystemPressure` | Show "camera unavailable" label. Await `interruptionEnded`. |
+
+### 8.3 GPU submission gating (Metal background rule)
+
+Metal apps cannot submit GPU commands in the background — violation causes `MTLCommandBufferErrorNotPermitted`
+("IOAF code 6") and process termination. This is a hard platform constraint, not a convention.
+
+**Gate edge: `.inactive`, not `.background`.**
+`.inactive` fires when the scene leaves active state (system alert, app switcher, notification,
+backgrounding preamble). `.background` is too late — GPU may already be revoked.
+
+UIKit equivalent: `applicationWillResignActive`, not `applicationDidEnterBackground`.
+
+**Implementation:**
+
+```swift
+// Atomic flag — visible to scene observer (@MainActor) and capture delegate (video queue)
+var gpuSubmissionEnabled = ManagedAtomic<Bool>(true)
+
+// ScenePhase observer
+.onChange(of: scenePhase) { _, newPhase in
+    switch newPhase {
+    case .inactive:
+        gpuSubmissionEnabled.store(false, ordering: .releasing)
+        lastCommittedCommandBuffer?.waitUntilScheduled()  // NOT waitUntilCompleted()
+    case .active:
+        gpuSubmissionEnabled.store(true, ordering: .releasing)
+    default: break
+    }
+}
+
+// captureOutput(_:didOutput:from:) — right before commit, after CPU work
+guard gpuSubmissionEnabled.load(ordering: .acquiring) else { return }
+commandBuffer.commit()
+lastCommittedCommandBuffer = commandBuffer
+```
+
+`waitUntilScheduled()` ensures committed work has been handed to the GPU driver (not that it has
+completed). `waitUntilCompleted()` blocks until GPU execution finishes — too strong.
+
+### 8.4 What survives a background trip
+
+**Retain across background:** `MTLDevice`, `MTLCommandQueue`, compiled pipeline states,
+`CVMetalTextureCache`, texture/buffer pools. Holding these is not GPU submission.
+
+**Do not retain:** in-flight command buffers not yet committed.
+
+### 8.5 Backgrounding sequence (revised)
+
+```
+scenePhase → .inactive
+  1. gpuSubmissionEnabled = false
+  2. lastCommandBuffer?.waitUntilScheduled()
+  3. (capture delegate drops subsequent frames at the gate)
+
+scenePhase → .background
+  4. If recording active: beginBackgroundTask → RecordingActor.stop() → endBackgroundTask
+  5. session.stopRunning() if viewWillDisappear hasn't already done it
+
+wasInterrupted (fires concurrently for videoDeviceNotAvailableInBackground)
+  → no-op; system has already handled the camera
+
+GPU resources (textures, pools, cache) are NOT released.
+```
+
+On foreground:
+```
+scenePhase → .active
+  1. gpuSubmissionEnabled = true
+
+viewWillAppear / interruptionEnded
+  2. session.startRunning() (on CaptureActor/sessionQueue)
+  3. Reapply persisted settings (ISO, exposure, WB, focus, processing params)
+  4. First frame arrives → encode-and-commit resumes normally
+```
+
+No `PipelineKit.rebuild()` on normal foreground. Rebuild only on resolution change or fatal error.
+The ~500ms black frame mentioned in the prior version of this section was caused by unnecessary
+full teardown — it should not occur with the correct shallow-resume pattern.
+
+### 8.6 `.inactive` policy choice
+
+`.inactive` also fires for notification banners, Control Center, and the app switcher — where the
+user is still "in" the app. Two reasonable policies:
+
+- **Strict** (recommended for this app): gate on `.inactive`. Brief preview freeze during
+  notification banners is acceptable for a scientific/microscopy use case.
+- **Loose**: gate on `.inactive` + check `UIApplication.shared.applicationState != .active`
+  before actually setting the flag. Avoids freeze for transient system UI.
+
+Default: strict.
 
 ---
 

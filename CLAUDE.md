@@ -20,8 +20,13 @@ between stages, not by a compiler.
 | 1 AUDIT | `prompt-1-audit.md` | `packed/`, `reference/`, `screenshots/` | `audit/` (13 files, Android-structured facts) |
 | 2 EXTRACT | `prompt-2-extract.md` | `audit/` only | `domain/` (13 files, platform-neutral requirements) |
 | 2.5 MANUAL REVIEW | (human) | `domain/` | `domain-revised/` (manually reviewed & corrected domain files) |
-| 3 DESIGN | `prompt-3-design.md` | `domain-revised/` primary + `audit/` escape hatch | `design/` (9 files, iOS architecture) |
-| 4 REVIEW | `prompt-4-review.md` | `domain-revised/` + `design/` only | `review/` (3 files, Green/Yellow/Red verdict) |
+| 3 DESIGN | `prompt-3-design.md` | `domain-revised/` (what) + `ios-platform-guide/` (how) + `audit/` escape hatch | `design/` (9 files, iOS architecture citing ADR-## by ID) |
+| 4 REVIEW | `prompt-4-review.md` | `domain-revised/` + `ios-platform-guide/` + `design/` only | `review/` (3 files, Green/Yellow/Red verdict) |
+
+`ios-platform-guide/` is a human-authored input to Agent 3 (not produced by any agent). It
+contains platform-level ADRs (ADR-01 … ADR-17) and gotchas (G-01 … G-24). Update it by hand
+when iOS conventions change; design outputs cite ADRs by ID and deviate only via a `D-##`
+decision that names the ADR.
 
 `orchestrator-prompt.md` is an experimental all-in-one driver. `*.archived` files are the
 old 2-prompt pipeline kept for reference — do not edit or re-activate them.
@@ -65,6 +70,10 @@ grep -rn -E 'because Camera2|Android equivalent|iOS equivalent|Kotlin|the Androi
 cat design/08-audit-lookups.md                     # >10 entries = yellow flag
 grep -l 'cv::Canny\|EdgeDetection' design/04-opencv-integration.md
 
+# After Agent 3 (DESIGN): every design file cites at least one ADR from ios-platform-guide/.
+# Run separately; each file (01..07) should report ≥ 1.
+for f in design/0[1-7]-*.md; do echo "$f: $(grep -cE 'ADR-[0-9]+' "$f")"; done
+
 # After Agent 4 (REVIEW): extract verdict.
 head -20 review/README.md                          # look for Green / Yellow / Red
 ```
@@ -79,15 +88,33 @@ image buffer") but must not use them as Android type references ("the `ImageRead
 reviewing either directory, judge by whether the word names an Android API surface, not by
 raw grep hits on the word alone.
 
-## iOS stack the design assumes (from Agent 3's injected expertise)
+## iOS platform baseline (from `ios-platform-guide/`, not the Android source)
 
-iOS 26+, Swift 6 strict concurrency, Metal 4, SwiftUI + UIKit (`MTKView` via
-`UIViewRepresentable`), Swift ↔ C++ direct interop, zero-copy via `CVMetalTextureCache` and
-`CVPixelBuffer` → `cv::Mat`. OpenCV is a **new capability** (Android doesn't use it) validated
-via an edge-detection consumer proof-of-concept. `CVPixelBuffer` and `cv::Mat` are not
-`Sendable`; buffer handling stays on one queue and only plain `Sendable` result structs cross
-actor boundaries. This expertise is injected via `prompt-3-design.md`, not derivable from
-`audit/` — do not try to "extract" it from the Android source.
+The iOS platform conventions Agent 3 builds on live in `ios-platform-guide/`, not in the
+Agent 3 prompt and not derivable from `audit/`. Headline choices:
+
+- iOS 26+, Swift 6 strict concurrency, Metal 3 baseline (Metal 4 features `#available`-gated),
+  SwiftUI + `MTKView` via `UIViewRepresentable`.
+- Two-file architecture baseline: `CameraView.swift` (SwiftUI + inline `UIViewRepresentable`
+  + ViewModel) and `CameraEngine.swift` (one actor owning `AVCaptureSession`, Metal,
+  consumers). See `ios-platform-guide/01-architecture.md` ADR-01/02.
+- Direct GPU outputs (preview, encoder via IOSurface pool, still readback) vs async consumers
+  (C++ CV pipelines with drop-on-busy dispatch). Preview is inviolable — sync consumer
+  dispatch is forbidden. ADR-03, ADR-13.
+- Zero-copy Metal via `CVMetalTextureCache` (ADR-04), working format `rgba16Float` for color
+  pipelines (ADR-05), GPU→encoder via IOSurface-backed `CVPixelBufferPool` + `MTLBlitCommandEncoder`
+  (ADR-06, ADR-16).
+- Swift ↔ C++ direct interop with `.interoperabilityMode(.Cxx)`; OpenCV headers stay private
+  to `.cpp` files; no Objective-C++ anywhere (ADR-11, ADR-12).
+- scenePhase `.background` stops the session; `.inactive` gates GPU submission (Metal
+  background rule; ADR-08, ADR-09).
+- `CVPixelBuffer` and `cv::Mat` are not `Sendable`; buffer handling stays on one queue and
+  only plain `Sendable` result structs cross actor boundaries (ADR-10).
+- OpenCV is a **new capability** (Android doesn't use it) validated via an edge-detection
+  consumer proof-of-concept.
+
+Update `ios-platform-guide/` by hand when platform conventions change. Do not try to
+"extract" these from the Android source — they're iOS-native.
 
 ## Reviewer discipline
 

@@ -1,0 +1,252 @@
+# 02 — Concurrency
+
+Covers isolation topology, Sendable strategy, scenePhase lifecycle, and the Metal
+background submission rule. Many of these are gotchas that are not obvious from Apple's
+docs but will crash or hang an app.
+
+---
+
+## ADR-07: Dedicated serial queue for AVCaptureSession
+
+`AVCaptureSession` and `AVCaptureDevice.lockForConfiguration()` must be called from a
+dedicated serial `DispatchQueue`, not from `@MainActor` and not from inside the
+`CameraEngine` actor directly. Apple's explicit requirement.
+
+```swift
+let sessionQueue = DispatchQueue(label: "camera.session", qos: .userInitiated)
+```
+
+- `startRunning()` is **synchronous** and blocks 100–500ms waiting for hardware
+  readiness. Calling it from `@MainActor` produces the purple runtime warning for UI
+  unresponsiveness.
+- The sample buffer delegate (`AVCaptureVideoDataOutputSampleBufferDelegate`) also
+  uses a serial queue — may be the same queue or a dedicated `delivery` queue.
+- The engine actor coordinates *with* these queues but doesn't *replace* them. Model:
+  engine actor methods hop onto `sessionQueue` via `sessionQueue.async { }` for session
+  work, and the capture delegate runs on the delivery queue and talks back via
+  `AsyncStream` continuations or actor-isolated methods.
+
+**Session object is created once per `open()`, reused across pause/resume.** Do not
+recreate `AVCaptureSession()` on every `viewWillAppear` / scene transition — it incurs
+full hardware re-init latency. See G-07.
+
+---
+
+## ADR-08: scenePhase semantics
+
+SwiftUI `scenePhase` has three values with distinct meanings. Binding the wrong one
+to the wrong action causes intermittent bugs:
+
+| scenePhase | Meaning | Action |
+|---|---|---|
+| `.active` | Foreground, receiving events | Normal submission; resume GPU if gated |
+| `.inactive` | Foreground but not receiving events (app switcher, notification banner, incoming call UI, Control Center) | **Gate GPU submission** (ADR-09). Do NOT stop the session. |
+| `.background` | Fully off-screen | `sessionQueue.async { session.stopRunning() }`. |
+
+**Do not use `scenePhase == .background` as the GPU gate** — by that point, the GPU
+resource may already be revoked and your process terminated. Gate on `.inactive`.
+
+**Do not use `scenePhase == .inactive` as the session stop** — it fires on notification
+banners, and stopping the camera for a notification banner is unacceptable UX.
+
+UIKit equivalents:
+- `applicationWillResignActive` ≈ `scenePhase == .inactive`
+- `applicationDidEnterBackground` ≈ `scenePhase == .background`
+
+**App Store policy note.** `session.stopRunning()` on backgrounding is not a
+performance optimization — it's a policy requirement. The status-bar camera
+indicator must disappear within ~1 second of the app going fully invisible,
+otherwise the app is rejectable. The `stopRunning()` call must complete before
+the view-layer task returns on the `.background` transition; don't defer it.
+See G-19.
+
+---
+
+## ADR-09: Metal background submission rule
+
+Apple's rule, stated flatly: *a Metal app cannot execute Metal commands in the
+background, and one that attempts this is terminated.* The violation appears as
+`MTLCommandBufferErrorNotPermitted` (IOAF code 6) and the process is killed.
+
+This is fundamentally unlike desktop OSes or Android, where the GPU is a resource
+you can keep talking to as long as you hold a surface. On iOS, the GPU is a gated
+system resource that's revoked from backgrounded apps.
+
+### Two mandatory actions before backgrounding
+
+**1. Stop submitting new command buffers.** Any `commit()` that lands after the system
+backgrounds you risks termination. Use an atomic gate:
+
+```swift
+import Atomics  // swift-atomics
+
+let gpuSubmissionEnabled = ManagedAtomic<Bool>(true)
+
+// In the capture delegate, immediately before commit:
+guard gpuSubmissionEnabled.load(ordering: .acquiring) else {
+    return  // drop the frame, release CVPixelBuffer
+}
+commandBuffer.commit()
+lastCommittedCommandBuffer = commandBuffer
+```
+
+The gate check must be **after** CPU-side work and **immediately before** `commit()` —
+that is the guarded operation.
+
+**2. Ensure in-flight work is scheduled** (not completed — scheduled). Already-committed
+command buffers run to completion even if the app backgrounds; uncommitted ones
+won't. In your backgrounding handler:
+
+```swift
+// On scenePhase → .inactive:
+gpuSubmissionEnabled.store(false, ordering: .releasing)
+lastCommittedCommandBuffer?.waitUntilScheduled()
+```
+
+- `waitUntilCompleted()` blocks until GPU execution finishes — too strong, and
+  dangerous on main.
+- `waitUntilScheduled()` blocks only until the command has been handed to the GPU
+  driver — the correct contract.
+
+### What you can safely retain across backgrounding
+
+| Safe to keep | Not safe to keep |
+|---|---|
+| `MTLDevice`, `MTLCommandQueue`, `MTLLibrary`, compiled pipeline states | Uncommitted command buffers |
+| `CVMetalTextureCache` | |
+| Pre-allocated `MTLTexture` / `MTLBuffer` pools | |
+
+Holding GPU resource objects is not submission. Retain them across backgrounding to
+avoid expensive re-initialization on foreground.
+
+### `.inactive` policy choice
+
+`.inactive` also fires for Control Center, notification banners, incoming call UI,
+and the app switcher — transient system UI where the user is still "in" your app.
+
+| Policy | Gate triggers on | Tradeoff |
+|---|---|---|
+| **Strict** | `.inactive` always | Safest; brief preview freeze on every notification banner |
+| **Loose** | `.inactive` + verify `UIApplication.shared.applicationState != .active` | Keeps rendering through notifications; only gates for true backgrounding |
+
+Pick based on product. A scientific/medical imaging app tolerates brief pauses; a
+consumer camera app does not.
+
+---
+
+## ADR-10: Sendable strategy
+
+**Rule: non-Sendable types never cross an actor boundary.** Enforce at compile time.
+The Sendable warnings are real; silencing them with `@unchecked Sendable` is a
+last resort.
+
+### Not Sendable (keep inside the engine)
+
+- `CVPixelBuffer`, `CVMetalTexture`, `CVMetalTextureCache`
+- `MTLTexture`, `MTLCommandBuffer`, any Metal object
+- `cv::Mat`, anything from OpenCV
+- Raw pointers into IOSurfaces
+
+### Sendable (safe to yield via `AsyncStream` or pass `@MainActor`)
+
+- Plain structs of POD fields
+- Enums with POD payloads
+- Result types: detection boxes, tracking coords, edge coordinates, sensor-metadata
+  snapshots
+- `@Observable` classes (Swift 6 infers Sendable when all stored fields are Sendable)
+
+### When a buffer *must* cross an isolation boundary
+
+Use Swift 6's `sending` parameter annotation (SE-0430). It transfers ownership at
+compile time without the runtime ambiguity of `@unchecked Sendable`:
+
+```swift
+func handoff(frame: sending IncomingFrame) async { ... }
+```
+
+`sending` is strictly stronger than `@unchecked Sendable`. Only fall back to
+`@unchecked Sendable` when importing an Apple type that Apple has not yet marked
+Sendable (e.g. `CVPixelBuffer` as of iOS 26) — and document the specific instance
+and its thread-safety contract.
+
+### Corollary: the frame clock never hops a Swift actor boundary
+
+The 30Hz capture-delegate → Metal → completion-handler → consumer-publish path runs
+entirely on the delivery `DispatchQueue`. No `await`, no cross-actor call. UI
+updates from a frame are coalesced into a single `Task { @MainActor in ... }`
+scheduled at the end of the delegate method, not one per state change.
+
+If you find yourself needing an `await` on the frame path, you're about to introduce
+hidden latency from suspension points. Prefer a nonisolated helper, or a C-ABI
+callback that publishes to an `AsyncStream` without hopping actors.
+
+---
+
+## Three state machines that must agree
+
+On backgrounding, three state machines interact. They must not conflict.
+
+```
+scenePhase → .inactive
+  ├─ gpuSubmissionEnabled = false           (atomic; ADR-09)
+  └─ lastCommittedCommandBuffer.waitUntilScheduled()
+
+scenePhase → .background
+  ├─ sessionQueue.async { session.stopRunning() }
+  └─ do NOT release CVMetalTextureCache / MTLDevice — retain them
+
+AVCaptureSession.wasInterrupted  (fires independently, around same time)
+  └─ videoDeviceNotAvailableInBackground → no-op; system already handled it
+```
+
+**Do not call `stopRunning()` in response to a system-initiated interruption.** The
+session is already in the interrupted state (`isInterrupted == true`); calling
+`stopRunning()` yourself races the system and produces undefined
+`isRunning`/`isInterrupted` state. See `04-avfoundation.md` for interruption
+handling.
+
+### Completion-handler re-entrancy guard
+
+Between `commandBuffer.commit()` and `addCompletedHandler` firing, the engine actor
+may have serviced other messages — `close()`, `backgroundSuspend()`,
+`setResolution()` — any of which may have released GPU resources the handler is
+about to touch.
+
+**Required pattern:** capture `sessionState` at commit time. In the handler,
+verify it hasn't changed before acting:
+
+```swift
+let frameSessionState = sessionState
+commandBuffer.addCompletedHandler { [weak self] cb in
+    if cb.status == .error, let err = cb.error {
+        Task { await self?.handleMetalError(err) }
+        return
+    }
+    Task { await self?.onFrameComplete(
+        readIndex: readIndex,
+        expectedState: frameSessionState
+    )}
+}
+
+// Inside the actor:
+func onFrameComplete(readIndex: Int, expectedState: SessionState) {
+    guard sessionState == expectedState, sessionState == .streaming else {
+        return  // drop silently; teardown ran between commit and completion
+    }
+    // ... safe to touch readback buffers, publish consumers, etc.
+}
+```
+
+Without this guard, a `close()` racing with a completion handler produces
+use-after-free crashes on readback buffers.
+
+On foreground:
+
+```
+scenePhase → .active
+  └─ gpuSubmissionEnabled = true
+
+AVCaptureSession resumes
+  (system via interruptionEnded, or manual via viewWillAppear)
+  └─ first frame arrives; encode-and-commit resumes normally
+```

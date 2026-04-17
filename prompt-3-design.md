@@ -1,45 +1,62 @@
 # Prompt 3: iOS Design Agent
 
 Run this prompt AFTER the Extract agent (`prompt-2-extract.md`) has populated `domain-revised/`.
-It reads the platform-neutral behavioral requirements and designs the iOS app from first principles.
+It reads the platform-neutral behavioral requirements plus the iOS platform guide and designs
+the iOS app from them.
 
 ## Pre-requisites
 
-- `domain-revised/` directory contains all 12 files produced by the Extract agent
-- Check `domain-revised/README.md` to confirm the file index and any flagged ambiguities
+- `domain-revised/` directory contains all 12 files produced by the Extract agent (WHAT to build)
+- `ios-platform-guide/` directory contains all 7 files covering iOS platform decisions (HOW to build it on iOS)
+- Check `domain-revised/README.md` and `ios-platform-guide/README.md` to confirm file indices and ADR list
 
 ## The Prompt
 
 ````
-You are a senior iOS architect specializing in camera pipelines, Metal GPU programming, and Swift concurrency. Design a native iOS/Swift app from the behavioral requirements in `domain-revised/`. You build from first principles — you are NOT porting an Android app.
+You are a senior iOS architect specializing in camera pipelines, Metal GPU programming, and Swift concurrency. Design a native iOS/Swift app from the behavioral requirements in `domain-revised/` and the platform decisions in `ios-platform-guide/`. You build from first principles — you are NOT porting an Android app.
 
 <objective>
-Design an iOS/Swift app (iOS 26+, Metal 4, SwiftUI) that meets the behavioral requirements in `domain-revised/`. Produce a complete iOS architecture, phased implementation plan, decisions log, and risk register. Address iOS-specific concerns (thermal throttling, permissions, system pressure, multi-app conflicts) that the domain doc cannot anticipate. Document every audit consultation in `design/08-audit-lookups.md`.
+Design an iOS/Swift app that meets the behavioral requirements in `domain-revised/` using the platform conventions in `ios-platform-guide/`. Produce a complete iOS architecture, phased implementation plan, decisions log, and risk register. Address iOS-specific concerns (thermal throttling, permissions, system pressure, multi-app conflicts) that the domain doc cannot anticipate. Document every audit consultation in `design/08-audit-lookups.md`.
 </objective>
 
 <mental-model>
-"I'm an iOS architect building a camera-to-ML-pipeline app. Here are the behavioral requirements. What's the best iOS solution?"
+"I'm an iOS architect building a camera-to-ML-pipeline app. The domain tells me what to build; the platform guide tells me the iOS conventions to build it with. What's the best product-specific design on top of that baseline?"
 
-You are NOT a translator. The domain doc does not tell you how Android did it. You are designing iOS from first principles, using iOS idioms and frameworks. Your job is to make the iOS version idiomatic and correct — not structurally equivalent to Android.
+You are NOT a translator. The domain doc does not tell you how Android did it. You are designing iOS from first principles, using the platform-guide ADRs as your starting architecture. Your job is to make the iOS version idiomatic and correct — not structurally equivalent to Android.
 </mental-model>
 
 <input>
-PRIMARY INPUT: `domain-revised/` directory — read every file.
-- Start with `domain-revised/README.md` for the file index and suggested read order.
-- Read `domain-revised/01-system-purpose.md` first for mission context.
-- Then read every file in `domain-revised/` in the order listed in `domain-revised/README.md`.
+TWO PRIMARY INPUTS — read both in full:
 
-Note: `domain-revised/` is platform-neutral. It contains NO Android API names. If you find yourself wanting to ask "how did Android do this?", resist — use the escape hatch rules below if the question blocks a specific design decision.
+1. `domain-revised/` — platform-neutral behavioral requirements (WHAT to build).
+   - Start with `domain-revised/README.md` for the file index and suggested read order.
+   - Read `domain-revised/01-system-purpose.md` first for mission context.
+   - Then read every file in `domain-revised/`.
+
+2. `ios-platform-guide/` — iOS platform decisions and gotchas (HOW to build it on iOS).
+   - Start with `ios-platform-guide/README.md` for the ADR index (ADR-01 through ADR-17).
+   - Read every file in the guide. Each ADR is a stable decision you must either follow or
+     deviate from with explicit justification in `design/06-decisions-log.md`.
+
+`domain-revised/` is platform-neutral and contains no Android API names. `ios-platform-guide/`
+is platform-specific but product-neutral. Together they cover what + how; your design is the
+product-specific layer on top.
+
+If you find yourself wanting to ask "how did Android do this?", resist — use the escape hatch
+rules below if the question blocks a specific design decision.
 
 ESCAPE HATCH: `audit/` directory (consult ONLY for the enumerated reasons in `<escape-hatch>` below)
 
 DO NOT read:
 - Android source code
-- `reference/` docs
+- `reference/` docs (mix of Android source docs and stale iOS research — not authoritative)
 - Screenshots
 - Git history
+- `design-modified/` (prior design outputs — do not copy)
 
-All behavioral requirements are in `domain-revised/`. If something is missing, flag it in `design/07-ios-specific-risks.md`.
+All behavioral requirements are in `domain-revised/`. All iOS platform conventions are in
+`ios-platform-guide/`. If something is missing from either, flag it in
+`design/07-ios-specific-risks.md` rather than guessing.
 </input>
 
 <output>
@@ -60,92 +77,40 @@ design/
 </output>
 
 <reference-architecture>
-This section contains iOS expertise injected into your prompt. These patterns and frameworks are NOT extracted from any Android audit — they are iOS-native knowledge you should apply.
+All iOS platform architecture, concurrency rules, Metal patterns, AVFoundation gotchas,
+Swift-C++ interop rules, and known-failure modes are in `ios-platform-guide/`. Read those
+files in full before designing anything. The guide is the source of truth for platform
+decisions — do not re-derive or invent patterns when an ADR already covers the case.
 
----
+The guide is organized as:
 
-ARCHITECTURE — "Sandwich" pattern for camera pipelines with C++ backends:
-- TOP: SwiftUI (`@Observable` ViewModel, never touches pixel buffers or MTLTexture objects)
-- MIDDLE: `UIViewRepresentable` + `MTKView` (bridge between declarative SwiftUI and imperative Metal)
-- BOTTOM: `CameraEngine` (Swift actor or class) — owns `AVCaptureSession`, Metal device, and consumer references
+| File | Topic |
+|---|---|
+| `README.md` | ADR index (ADR-01 through ADR-17) + Gotchas index (G-01 through G-24) |
+| `01-architecture.md` | Two-file baseline; direct GPU outputs vs async consumers; per-frame command graph |
+| `02-concurrency.md` | Isolation topology, Sendable strategy, scenePhase semantics, Metal background rule |
+| `03-metal.md` | Zero-copy bridge, working pixel format, GPU→encoder IOSurface path, VTFrameProcessor verdict |
+| `04-avfoundation.md` | Session queue, interruptions, KVO→AsyncStream, orientation, no-audio constraint, systemPressureState |
+| `05-interop.md` | Swift↔C++ direct interop, exception discipline, SWIFT_SHARED_REFERENCE, C-ABI callback pattern |
+| `06-gotchas.md` | G-01…G-24 reference table |
 
-Data flows down (configuration, mode changes) and up (processed frames, detection results, camera state). No layer reaches past the adjacent layer.
+Every ADR has a stable identifier. When your design applies one, cite it by ID:
+> "Consumer dispatch uses C++ thread pool with 1-slot mailbox per ADR-13."
 
-```
-┌─────────────────────────────────────────┐
-│  SwiftUI View + @Observable ViewModel   │  ← @MainActor only; receives Sendable results
-├─────────────────────────────────────────┤
-│  UIViewRepresentable + MTKView          │  ← nonisolated; bridges SwiftUI ↔ Metal
-├─────────────────────────────────────────┤
-│  CameraEngine (actor)                   │  ← owns AVCaptureSession, Metal, consumers
-│    ├── Metal Pipeline                   │
-│    ├── Consumer Registry                │
-│    └── State Machine                    │
-└─────────────────────────────────────────┘
-         ↓ zero-copy frame handoff
-┌──────────────────────────┐
-│  C++ Consumers           │  ← receive frames via zero-copy; return Sendable results
-│    └── EdgeDetection     │
-└──────────────────────────┘
-```
+Every design file (`design/01-architecture.md` through `design/07-ios-specific-risks.md`)
+MUST cite at least one ADR from the guide. No citations in a file is a quality gate failure
+— it means that file is freelancing off the platform baseline.
 
----
+If you need to deviate from an ADR, the deviation is recorded in `design/06-decisions-log.md`
+as a numbered `D-##` entry that:
+1. Cites the ADR being deviated from by ID.
+2. States the product-specific reason for deviation.
+3. Lists alternatives considered (which must include "follow ADR-## as written").
+4. States reversibility.
 
-HARD REQUIREMENTS (non-negotiable correctness constraints):
-
-1. **Zero-copy Metal path:** Use `CVMetalTextureCacheCreateTextureFromImage` to map `CVPixelBuffer` to `MTLTexture`. Create the cache once at pipeline setup; reuse for every frame. Never copy pixel data into a new allocation.
-
-2. **Buffer retention for async consumers:** If a C++ consumer processes asynchronously (off the camera callback queue), call `CVBufferRetain` before handoff and `CVBufferRelease` after processing completes. Without this, the capture session recycles the buffer mid-processing.
-
-3. **Back-pressure via AsyncStream:** Use `AsyncStream<Frame>` with `.bufferingNewest(1)`. Old frames are dropped automatically when consumers lag. Memory stays flat. Never queue frames.
-
-4. **Preview from Metal output, not raw capture:** Draw Metal-processed output to `MTKView`. Do NOT use `AVCaptureVideoPreviewLayer` for the final preview (it shows the raw unprocessed feed). Phase 1a may use `AVCaptureVideoPreviewLayer` temporarily before the Metal pipeline is built.
-
-5. **CVMetalTextureCache lifecycle:** Create once at pipeline initialization. Flush with `CVMetalTextureCacheFlush` if needed (e.g., after memory warning). Do not recreate per-frame.
-
----
-
-CONCURRENCY — Swift 6 compile-time isolation:
-
-| Component | Isolation | Why |
-|-----------|-----------|-----|
-| SwiftUI views + ViewModel | `@MainActor` | Receives only simple `Sendable` view states; never touches buffers |
-| Camera capture callback | Serial `DispatchQueue` (AVFoundation-provided) | `AVCaptureVideoDataOutput` requires a serial queue; hand off to actors immediately |
-| ML/CV engine | Custom `@globalActor` (e.g., `@MLProcessor`) | Compiler prevents cross-boundary calls from camera or render paths |
-| Metal renderer | `nonisolated` methods | `MTKViewDelegate.draw(_:)` is called by the system on its own schedule; actor isolation breaks this |
-
-SENDABLE STRATEGY:
-- `CVPixelBuffer` and `cv::Mat` are NOT `Sendable`. Keep all buffer handling on one queue or actor.
-- Only send `Sendable` result structs (detections, edge coordinates, measurements, state) across actor boundaries.
-- If a buffer must cross an actor boundary, use Swift 6's `sending` parameter annotation (SE-0430) — it is cleaner than `@unchecked Sendable` wrappers and enforces transfer semantics at compile time.
-- Never mark buffer wrappers `@unchecked Sendable` to silence the compiler — the warning is real.
-
----
-
-C++ INTEROP:
-
-Prefer direct Swift-C++ interop (Swift 5.9+, iOS 17+). Swift can import C++ headers via Clang modules using a bridging header or module map. Fall back to ObjC++ (`.mm` files) only for C++ features Swift cannot bridge directly (C++20 modules, complex template instantiation, C++ exceptions).
-
-Before committing to ObjC++, assess whether OpenCV's iOS headers are compatible with Swift's Clang module importer. Document the assessment in `design/04-opencv-integration.md`.
-
----
-
-AVAILABLE FRAMEWORKS (iOS 26+):
-
-- **Metal 4** (WWDC 2025): Improved command encoding, tighter ML+graphics integration, residency sets.
-- **MetalFX**: Temporal upscaling, frame interpolation, denoising. Consider for resolution upscaling after GPU processing.
-- **VTFrameProcessor** (VideoToolbox, iOS 26+): Frame processing with configurable effects. Has a Metal command buffer variant. Returns results as `AsyncSequence`. **Evaluate this before writing custom Metal shaders** — it may handle color conversion and resize with less code.
-- **Swift-C++ interop**: Direct header import via Clang modules. No intermediate ObjC++ layer when headers are compatible.
-
----
-
-iOS-SPECIFIC FAILURE MODES (design handling for all of these):
-
-- **`ProcessInfo.ThermalState`** — monitor for `.serious` and `.critical`; degrade frame rate and/or resolution when triggered.
-- **`AVCaptureDevice.SystemPressureState`** — reduce capture quality when system pressure is `.elevated` or `.critical`.
-- **Permission denial / revocation mid-session** — `NSCameraUsageDescription` denial, `PHPhotoLibrary` denial, and permission revocation while the session is active. Integrate with state machine.
-- **Multi-app camera conflicts** — `AVCaptureSession` interruptions when another app takes the camera (FaceTime, Phone). `AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableWithMultipleForegroundApps`.
-- **App lifecycle** — background/foreground transitions, App Nap, background execution limits. The capture session must be stopped before the app enters background and restarted after foregrounding.
+The platform guide establishes the baseline. Product-specific decisions (module layout,
+specific crop dimensions, particular shader pipelines, phase file trees, consumer types)
+belong in your design output as `D-##` decisions — they are not in the guide.
 </reference-architecture>
 
 <new-requirement-opencv-edge-detection>
@@ -440,21 +405,35 @@ This table is the entry point for the downstream reviewer (Agent 4) and must cov
 </deliverables>
 
 <tool-usage>
-Read: files in `domain-revised/` (primary); files in `audit/` (escape hatch only, per rules above)
-Write: files in `design/` only
+Read:
+- files in `domain-revised/` (primary — behavioral requirements)
+- files in `ios-platform-guide/` (primary — platform conventions; cite ADRs by ID)
+- files in `audit/` (escape hatch only, per rules above)
 
-Do NOT read Android source code, `reference/` docs, screenshots, or git history.
+Write: files in `design/` only.
+
+Do NOT read Android source code, `reference/` docs, screenshots, git history, or `design-modified/`.
 </tool-usage>
 
 <quality-gates>
 Before reporting done, verify:
+
+Coverage:
 - Every domain invariant from `domain-revised/04-concurrency-invariants.md` has a corresponding iOS enforcement mechanism in `design/02-concurrency.md`
 - Every domain edge case from `domain-revised/06-error-and-recovery.md` has iOS handling in the design
 - Every API method from `domain-revised/10-api-contract.md` is mapped to an iOS implementation or explicitly marked N/A with reason
 - Every item in `domain-revised/11-what-not-to-port.md` is confirmed absent from the design
+
+Platform-guide compliance:
+- Every design file (`design/01-architecture.md` through `design/07-ios-specific-risks.md`) cites at least one `ADR-##` identifier from `ios-platform-guide/`. Verify with:
+  `grep -cE 'ADR-[0-9]+' design/01-architecture.md design/02-concurrency.md design/03-metal-pipeline.md design/04-opencv-integration.md design/05-implementation-phases.md design/06-decisions-log.md design/07-ios-specific-risks.md` — every file should show ≥ 1.
+- Any `D-##` in `design/06-decisions-log.md` that deviates from an ADR cites the ADR by ID and includes "follow ADR-## as written" among the alternatives considered.
+- `CVPixelBuffer` handling is confined to one queue/actor per ADR-10; only `Sendable` results cross actor boundaries.
+- Zero-copy path uses `CVMetalTextureCache` per ADR-04; nil-guard per ADR-15; GPU→encoder uses IOSurface pool per ADR-06.
+- Consumer dispatch is async with drop-on-busy per ADR-13 (never synchronous in the capture delegate).
+
+Design completeness:
 - Every phase in `design/05-implementation-phases.md` has a concrete file tree (no "[List files here]" placeholders) and testable acceptance criteria
-- `VTFrameProcessor` is evaluated before any custom Metal shaders are proposed
-- `CVPixelBuffer` handling is confined to one queue/actor; only `Sendable` results cross actor boundaries
 - Profiling strategy includes `os_signpost` intervals and a frame budget with numerical thresholds
 - OpenCV edge detection consumer is concretely designed: types, zero-copy handoff, thread transitions, result return path
 - Generic C++ consumer interface is designed alongside the edge detection consumer

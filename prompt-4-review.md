@@ -6,6 +6,7 @@ It runs correctness and adversarial passes on the iOS design and produces a find
 ## Pre-requisites
 
 - `domain-revised/` directory contains all 12 files produced by Agent 2 (Extract)
+- `ios-platform-guide/` directory contains all 7 files (platform decisions + ADR-## index)
 - `design/` directory contains all 8 files produced by Agent 3 (Design)
 
 ## The Prompt
@@ -30,16 +31,18 @@ You live entirely in the iOS concurrency domain. You have never read the Android
 
 <input>
 Read only:
-- `domain-revised/` (complete — all 12 files)
-- `design/` (complete — all 8 files)
+- `domain-revised/` (complete — all 12 files; behavioral requirements)
+- `ios-platform-guide/` (complete — all 7 files; platform ADRs and gotchas — the baseline the design should be built on)
+- `design/` (complete — all 8 files; the product-specific design under review)
 
 DO NOT read:
 - `audit/` — the Android audit is off-limits; you live in the iOS domain, not the Android one
 - Android source code
 - `reference/` docs
+- `design-modified/` — prior design snapshots; not authoritative for review
 - Screenshots
 
-If you believe something is missing from `domain-revised/`, the finding is "fix `domain-revised/` (re-run Agent 2)". If something is missing from `design/`, the finding is "fix `design/` (re-run Agent 3)". Neither finding requires you to read `audit/`.
+If you believe something is missing from `domain-revised/`, the finding is "fix `domain-revised/` (re-run Agent 2)". If something is missing from `ios-platform-guide/`, the finding is "fix `ios-platform-guide/` (human-authored — escalate to operator)". If something is missing from `design/`, the finding is "fix `design/` (re-run Agent 3)". Never requires reading `audit/`.
 </input>
 
 <output>
@@ -111,6 +114,18 @@ CATEGORY D — Quality Checks
 
 ---
 
+CATEGORY E — Platform-Guide Compliance
+
+The design is built on top of `ios-platform-guide/`. Check that it actually follows the ADRs.
+
+- **ADR citation coverage:** every design file (`design/01-architecture.md` through `design/07-ios-specific-risks.md`) cites at least one `ADR-##` identifier. Run `grep -cE 'ADR-[0-9]+' design/0[1-7]-*.md`; any file with 0 hits is a fail.
+- **ADR claim verification:** for each ADR cited in the design, verify the design's implementation matches the ADR's text (not just the ID). E.g., if the design cites ADR-13 (drop-on-busy async consumers), verify the consumer dispatch is actually async, not a synchronous call in the capture delegate.
+- **Deviations are documented:** any `D-##` entry in `design/06-decisions-log.md` that conflicts with an ADR must cite the ADR by ID, explain the product-specific reason for deviation, list "follow ADR-## as written" among alternatives considered, and state reversibility. Silent deviation (doing something different from an ADR without acknowledging it) is a fail.
+- **Gotcha coverage:** for each relevant `G-##` entry in `ios-platform-guide/06-gotchas.md`, verify the design either handles it or explicitly marks it out-of-scope. Especially: G-05 (Metal background), G-08 (recording drain in background), G-18 (BGRA vs RGBA channel order), G-19 (stopRunning within 1s of backgrounding), G-20 (completion-handler re-entrancy guard), G-21 (VTFrameProcessor mismatch).
+- **Forbidden patterns:** no `MTLTexture.getBytes` on the recording path (violates ADR-06 zero-copy). No synchronous C++ call in the capture delegate (violates ADR-13). No `.mm` files (violates ADR-11). No `AVCaptureSession` creation in `viewWillAppear` (violates G-07).
+
+---
+
 SUMMARY TABLE (at the end of `review/01-correctness-check.md`):
 
 | Category | Items checked | Passed | Failed | Partial |
@@ -119,12 +134,13 @@ SUMMARY TABLE (at the end of `review/01-correctness-check.md`):
 | B — Design Completeness | 4 | | | |
 | C — OpenCV Edge Detection | 6 | | | |
 | D — Quality Checks | 3 | | | |
-| **Total** | **25** | | | |
+| E — Platform-Guide Compliance | 5 | | | |
+| **Total** | **30** | | | |
 
 CORRECTNESS PASS VERDICT:
-- **Green** — zero critical failures (all Category C items pass, no fails in A or B)
-- **Yellow** — some partials, no critical failures
-- **Red** — any Category C item fails, OR any Category A fail in domain files 01 (system purpose), 02 (frame delivery), 04 (concurrency invariants), or 05 (resource lifecycle) — these are core missions and safety-critical invariants, OR multiple Category A/B failures in other domain files.
+- **Green** — zero critical failures (all Category C items pass, no fails in A, B, or E)
+- **Yellow** — some partials, no critical failures; OR 1–2 silent ADR deviations in Category E
+- **Red** — any Category C item fails, OR any Category A fail in domain files 01 (system purpose), 02 (frame delivery), 04 (concurrency invariants), or 05 (resource lifecycle) — these are core missions and safety-critical invariants, OR multiple Category A/B/E failures, OR a forbidden-pattern violation in Category E (Metal background, zero-copy recording, sync consumer dispatch).
 </pass-1-correctness>
 
 <pass-2-adversarial>
@@ -251,10 +267,10 @@ Write `review/README.md` with the following sections:
 </readme>
 
 <tool-usage>
-Read: files in `domain-revised/` and `design/` only.
+Read: files in `domain-revised/`, `ios-platform-guide/`, and `design/` only.
 Write: files in `review/` only.
 
-DO NOT read `audit/`, Android source code, `reference/` docs, screenshots, or git history. You never consult these. Your entire evidence base is `domain-revised/` and `design/`.
+DO NOT read `audit/`, Android source code, `reference/` docs, `design-modified/`, screenshots, or git history. You never consult these. Your entire evidence base is `domain-revised/` (what to build), `ios-platform-guide/` (platform baseline), and `design/` (design under review).
 </tool-usage>
 
 <quality-gates>

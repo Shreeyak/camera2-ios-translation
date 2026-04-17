@@ -108,19 +108,25 @@ The camera session and GPU pipeline continue running; only the surface binding i
 
 ## Application Lifecycle Integration
 
-The system integrates with the application lifecycle to release camera resources when the app becomes fully invisible:
+Two independent signal sources drive lifecycle management. They must not be conflated — conflating them causes race conditions and unnecessary teardown.
 
-**App goes fully invisible:**
-1. Recording is stopped (if active).
-2. Full teardown is performed.
-3. State is set internally to closed without emitting a user-visible state change.
-4. A "background suspended" flag is set to suppress recovery retries.
+**User-initiated lifecycle (view lifecycle):**
+When the camera view disappears, halt the capture session. No resource teardown is required — retain the session and GPU resources for rapid restart when the view reappears. Recreating the session object on every appearance is an explicit anti-pattern that defeats this optimization and incurs unnecessary hardware re-initialization latency.
 
-**App returns to visible:**
-1. Background suspended flag is cleared.
-2. If a camera was previously open, the reopen sequence begins.
+**System-initiated lifecycle (platform interruptions):**
+The platform independently signals camera interruptions when the app backgrounds, another process takes the camera, or system pressure forces GPU access restrictions. Observe and classify these signals; do not proactively tear down in response:
+- Camera unavailable because app is in background: await platform restoration; no teardown action required.
+- Camera taken by another process: surface a manual resume control to the user; await user intent or platform restoration signal.
+- System resource pressure: surface "camera unavailable" indicator; await restoration signal.
 
-The "fully invisible" trigger must be chosen carefully on the target platform — using "partially occluded" (e.g., dialog overlay) would cause unnecessary camera release. The intended behavior is: release only when the app is completely off-screen.
+**GPU submission gating:**
+The platform may revoke GPU submission rights before the app is fully invisible — at the point the scene begins transitioning away from active state, not at the point it becomes fully invisible. GPU command submission must stop at this earlier edge. Commands already committed to the GPU will complete; commands not yet submitted must be dropped. In-flight capture callbacks arriving after the gate is set must check the gate before submitting GPU work, as close to the submission as possible.
+
+**On restoration:**
+When the platform signals camera access is restored, restart the existing session. Do not recreate the session object. Reapply persisted settings after restart.
+
+**Background recording drain:**
+If recording is active when backgrounding begins, the recording must be finalized before the process is suspended. Request a platform background execution extension to complete the drain. If the drain window expires before finalization, cancel the write rather than leave the file in a permanently corrupted state. A corrupted output file (moov atom never written) is worse than no file.
 
 [audit: 07-state-machine.md §Background Suspend/Resume, 12-git-archaeology.md §Key Architecture Decisions]
 
