@@ -134,25 +134,42 @@ is subtly wrong — detectable only by golden-fixture tests, not by visual inspe
 
 ---
 
-## ADR-06: GPU→encoder via IOSurface-backed pool
+## ADR-06: GPU→encoder via IOSurface-backed pool (compute conversion)
 
 The domain requirement "encoder receives GPU-processed frames without CPU-side
 conversion" is expressed on iOS as:
 
 1. `AVAssetWriterInputPixelBufferAdaptor` configured with `sourcePixelBufferAttributes`
    specifying:
-   - `kCVPixelBufferPixelFormatTypeKey` (match encoder input, typically 8-bit YUV or BGRA)
+   - `kCVPixelBufferPixelFormatTypeKey` — typically
+     `kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange` (NV12, video-range) to match
+     VideoToolbox hardware-encoder input. 8-bit BGRA works too but costs extra
+     bandwidth; NV12 is the native encoder format.
    - `kCVPixelBufferIOSurfacePropertiesKey: [:]`
    - `kCVPixelBufferMetalCompatibilityKey: true`
 2. Dequeue a `CVPixelBuffer` from the adaptor's `pixelBufferPool`.
-3. Wrap it as an `MTLTexture` via `CVMetalTextureCache` (the same cache as ADR-04).
-4. `MTLBlitCommandEncoder` blits the processed texture into the wrapped encoder
-   texture — GPU-local, stays in IOSurface memory.
+3. Wrap it as one or two `MTLTexture`s via `CVMetalTextureCache` (the same cache as
+   ADR-04). For NV12, create two plane textures: `.r8Unorm` for Y (full res) and
+   `.rg8Unorm` for interleaved CbCr (half res).
+4. **Compute pass** (`MTLComputeCommandEncoder`) reads the processed `rgba16Float`
+   texture and writes directly into the plane textures of the encoder-pool
+   `CVPixelBuffer`. The kernel performs:
+   - BT.709 RGB → YCbCr matrix (video-range or full-range to match the chosen
+     pixel format)
+   - Half-float → 8-bit quantization
+   - 2×2 chroma downsample into the CbCr plane
+   This is **not** a blit. `MTLBlitCommandEncoder` only does copies + mipmap
+   generation; it cannot do matrix math, precision conversion, or subsampling.
 5. `adaptor.append(pixelBuffer, withPresentationTime: pts)` — VideoToolbox maps the
    same IOSurface for encoding. No CPU copy.
 
 **`MTLTexture.getBytes(_:)` is forbidden on this path.** It copies GPU memory to
 CPU and defeats zero-copy — violates the domain invariant.
+
+**If the recording target is BGRA instead of NV12** (e.g. a ProRes-like workflow or
+legacy consumer), the pass is still compute, not blit: RGBA16F → BGRA8 is a
+precision + channel-swizzle conversion. Only a same-format, same-precision copy
+qualifies as a blit, and that's not what's happening here.
 
 ---
 
@@ -213,6 +230,36 @@ file the system can't parse.
 
 Combine with `UIApplication.beginBackgroundTask` if the drain can span a scene
 transition — see G-08.
+
+---
+
+## ADR-20: PixelSink texture storage mode is dynamic — flip to `.shared` on consumer attach
+
+naturalTex and processedTex default to `.private` (GPU-only) when no PixelSink subscriber
+is attached. `.private` textures have a nil `.iosurface` property; any attempt to publish
+them to C++ consumers via IOSurface silently drops all frames (see G-25).
+
+When any subscriber for the `.natural` or `.processed` stream is registered,
+TexturePoolManager must:
+
+1. Allocate replacement textures with `.storageMode = .shared`, backed by IOSurface.
+   Create via `device.makeTexture(descriptor:iosurface:plane:)`, where the IOSurface is
+   obtained from a `CVPixelBuffer` dequeued from a `CVPixelBufferPool` configured with:
+   ```swift
+   kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any]
+   kCVPixelBufferMetalCompatibilityKey: true
+   ```
+2. Rotate the pool over one frame — allow any in-flight `.private` command buffer to drain
+   before swapping to the new `.shared` textures. Do not swap mid-frame.
+3. On all-subscriber-unsubscribe, rotate back to `.private` over one frame to recover DRAM
+   bandwidth.
+
+trackerTex is always `.shared`: the tracker consumer is designed-in from the start, not
+optional. Its `.iosurface` is always non-nil.
+
+**`.private` → `.shared` is not a free operation.** IOSurface-backed textures are coherent
+with CPU and other processes, which costs bandwidth. Default `.private` for any stream where
+C++ consumers are optional; flip only on attach.
 
 ---
 

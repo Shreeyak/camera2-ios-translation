@@ -34,6 +34,8 @@ crash or silently degrade an app if missed.
 | G-22 | Device capability assumed, not verified → silent malfunction on other device models | Check `isVideoHDRSupported`, `isVideoRotationAngleSupported(_:)`, and similar per-capability flags at session config; throw named errors on missing capability. |
 | G-23 | Running CV on the full-resolution processed stream instead of the tracker stream → 15–25ms per frame, misses budget | Subscribe CV consumers to tracker stream (~480p, ~0.3M px). Canny budget 2–4ms at that resolution on A16. |
 | G-24 | Adding `NSMicrophoneUsageDescription` without using the mic → App Store rejection ("misleading usage description") | Only declare usage keys for permissions actually requested at runtime. |
+| G-25 | `MTLTexture` allocated with `.private` storage mode has a nil `.iosurface` property — publishing to PixelSink via `texture.iosurface` silently passes nil, dropping all frames to C++ consumers with no error | When any PixelSink subscriber is attached to the natural or processed stream, TexturePoolManager must allocate `.shared` textures (IOSurface-backed). Default `.private` only when no consumer is present (ADR-20). |
+| G-26 | PixelSink consumer without a per-stream drop counter exposes no signal when the mailbox is overwriting — EdgeDetector can degrade from 30 Hz to 5 Hz under thermal throttling with the pipeline appearing healthy | Every C++ PixelSink consumer must expose `std::atomic<uint64_t> overwriteCount_[3]` and a C-ABI `drainStats(StreamId) -> StreamStats` getter; poll at 1 Hz and surface alongside thermal state (ADR-13, ADR-19). |
 
 ---
 

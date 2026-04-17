@@ -52,6 +52,7 @@ cite these by ID (e.g. "per `ADR-06`" in `design/03-metal-pipeline.md`).
 | ADR-17 | Orientation via `AVCaptureConnection.videoRotationAngle` (not shader UV transform) | 04 |
 | ADR-18 | Frame set publication: one atomic `FrameSet` carries natural + processed + tracker IOSurface refs, capture metadata, processing metadata, and tracker signals | 05 |
 | ADR-19 | Pool sizing (`N+1`), latest-wins mailboxes, per-lane drop counters | 05 |
+| ADR-20 | PixelSink texture storage mode is dynamic: `.private` by default, flips to `.shared` (IOSurface-backed) on consumer attach, rotates back on all-unsubscribe | 03 |
 
 ## Gotchas Index (G-##)
 
@@ -60,3 +61,8 @@ crash or silently degrade the app if missed.
 
 See `06-gotchas.md` for descriptions. Referenced by ID elsewhere in the guide and in
 design outputs.
+
+| ID | Pitfall |
+|---|---|
+| G-25 | `.private` texture has nil `.iosurface` → PixelSink fanout silently drops frames (ADR-20) |
+| G-26 | PixelSink consumer without per-stream drop counter → overwrite drops invisible under throttling (ADR-13, ADR-19) |

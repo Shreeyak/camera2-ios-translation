@@ -2,6 +2,31 @@
 
 Changes to `ios-platform-guide/`. Dates are when the change landed on `main`.
 
+## 2026-04-18
+
+### Added
+- **ADR-20 — PixelSink texture storage mode is dynamic.** New section in `03-metal.md`.
+  `naturalTex` and `processedTex` default to `.private` (GPU-only) when no PixelSink
+  subscriber is attached. On subscriber attach, `TexturePoolManager` allocates `.shared`
+  IOSurface-backed replacements and rotates the pool over one frame; rotates back to
+  `.private` on all-unsubscribe. `trackerTex` is always `.shared`. Motivated by G-25:
+  `.private` textures have a nil `.iosurface` property — IOSurface publish silently
+  drops all frames when the table is wrong.
+- **G-25 — `.private` texture → nil `.iosurface` → silent PixelSink fanout failure.**
+  New entry in `06-gotchas.md`. Publishing a `.private`-storage `MTLTexture` to a C++
+  consumer via `texture.iosurface` passes nil; no crash, no error, all frames lost.
+  Remedy: use `.shared` (ADR-20) when any consumer is subscribed.
+- **G-26 — PixelSink consumer without per-stream drop counter.** New entry in
+  `06-gotchas.md`. A consumer with no overwrite counter hides frame loss under thermal
+  throttling — the pipeline looks healthy while EdgeDetector degrades from 30 Hz to 5 Hz.
+  Remedy: every consumer exposes `std::atomic<uint64_t> overwriteCount_[3]` and a C-ABI
+  `drainStats(StreamId) -> StreamStats` getter; poll at 1 Hz alongside thermal state.
+
+### Index
+- `README.md` ADR index gained row for ADR-20; Gotchas index gained rows for G-25 and G-26.
+
+---
+
 ## 2026-04-17
 
 ### Added

@@ -34,7 +34,7 @@ TWO PRIMARY INPUTS — read both in full:
    - Then read every file in `domain-revised/`.
 
 2. `ios-platform-guide/` — iOS platform decisions and gotchas (HOW to build it on iOS).
-   - Start with `ios-platform-guide/README.md` for the ADR index (ADR-01 through ADR-17).
+   - Start with `ios-platform-guide/README.md` for the ADR index (ADR-01 through ADR-20).
    - Read every file in the guide. Each ADR is a stable decision you must either follow or
      deviate from with explicit justification in `design/06-decisions-log.md`.
 
@@ -86,13 +86,13 @@ The guide is organized as:
 
 | File | Topic |
 |---|---|
-| `README.md` | ADR index (ADR-01 through ADR-17) + Gotchas index (G-01 through G-24) |
+| `README.md` | ADR index (ADR-01 through ADR-20) + Gotchas index (G-01 through G-26) |
 | `01-architecture.md` | Two-file baseline; direct GPU outputs vs async consumers; per-frame command graph |
 | `02-concurrency.md` | Isolation topology, Sendable strategy, scenePhase semantics, Metal background rule |
 | `03-metal.md` | Zero-copy bridge, working pixel format, GPU→encoder IOSurface path, VTFrameProcessor verdict |
 | `04-avfoundation.md` | Session queue, interruptions, KVO→AsyncStream, orientation, no-audio constraint, systemPressureState |
 | `05-interop.md` | Swift↔C++ direct interop, exception discipline, SWIFT_SHARED_REFERENCE, C-ABI callback pattern |
-| `06-gotchas.md` | G-01…G-24 reference table |
+| `06-gotchas.md` | G-01…G-26 reference table |
 
 Every ADR has a stable identifier. When your design applies one, cite it by ID:
 > "Consumer dispatch uses C++ thread pool with 1-slot mailbox per ADR-13."
@@ -479,10 +479,22 @@ Platform-guide compliance:
 - `CVPixelBuffer` handling is confined to one queue/actor per ADR-10; only `Sendable` results cross actor boundaries.
 - Zero-copy path uses `CVMetalTextureCache` per ADR-04; nil-guard per ADR-15; GPU→encoder uses IOSurface pool per ADR-06.
 - Consumer dispatch is async with drop-on-busy per ADR-13 (never synchronous in the capture delegate).
-- Every C++ `PixelSink` consumer (including the tracker/Canny consumer) exposes a `mailbox_overwrite_count`
-  published into `FrameDeliveryStats` alongside the Swift-side per-lane `dropped_mailbox_overwrite`
-  counters (ADR-13 observability requirement). A tracker consumer with no overwrite counter is a
-  quality gate failure.
+- Every C++ `PixelSink` consumer (including the tracker/Canny consumer) exposes
+  `std::atomic<uint64_t> overwriteCount_[3]` (one slot per `StreamId`) incremented on each
+  mailbox overwrite, and a C-ABI getter `PixelSink::drainStats(StreamId) -> StreamStats` that
+  returns and atomically resets the counter. `CameraControlViewModel` polls `drainStats` via
+  `MLProcessor` at 1 Hz and publishes the per-stream counts alongside thermal state. A tracker
+  consumer with no overwrite counter is a quality gate failure (G-26).
+- Texture spec table in `design/03-metal-pipeline.md` marks naturalTex and processedTex as
+  `.shared` (IOSurface-backed) when any PixelSink subscriber is present (ADR-20, G-25). `.private`
+  is only correct when no consumer subscribes. If the table shows `.private` alongside an IOSurface
+  publish path, it is a quality gate failure.
+- `design/02-concurrency.md` includes a dedicated section documenting the
+  `lockForConfiguration()` / `defer { unlockForConfiguration() }` bracket pattern with the
+  ISO+exposure coupled-commit rule (`setExposureModeCustom(duration:iso:completionHandler:)`).
+  Omitting this from the design output is a quality gate failure even though the pattern is
+  already required in these quality gates (G-04, `ios-platform-guide/04-avfoundation.md`
+  §Device configuration windows).
 - `FrameSet` carries all three sinks (natural, processed, tracker) per ADR-18; three separate `CVPixelBufferPool`s per ADR-19.
 - Still capture uses Metal readback from `processedTex` (crop + color ops), not `AVCapturePhotoOutput`.
 - Every `AVCaptureDevice` property mutation is wrapped in `try device.lockForConfiguration()` /
