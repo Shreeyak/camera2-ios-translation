@@ -1,112 +1,111 @@
-# Pass 1 — Correctness Check
+# 01 — Correctness Check (Pass 1)
 
-**Reviewer role:** Agent 4 (REVIEW)
-**Primary inputs:** `design/` (architecture), `domain/` (behavioral requirements)
-**Constraint:** `audit/` not read; `00-ios-specialist-prereview.md` not echoed
+**Mental model:** Does this design do everything the domain requires? Is nothing missed?
 
-> **Patch status legend** (annotations added after Agent 4 review):
-> - **[PATCHED]** — fix applied to `design/` during the post-review patch pass; verified by grep + file read
-> - **[DEFERRED]** — left to implementation time; tracked as an open issue
-> - **[N/A]** — nothing to patch (item was already PASS)
+Merged from two independent Agent-4 runs (Sonnet + Opus). Each item gets
+**pass / fail / partial** with a specific design-section reference. Pass-2 attacks
+are in `02-adversarial-red-team.md`.
 
 ---
 
 ## Category A — Requirements Coverage
 
-Does the design address every requirement from each domain file?
+| # | Domain file | Verdict | Addressed in | Notes |
+|---|---|---|---|---|
+| A-01 | `domain-revised/01-system-purpose.md` | **Pass** | `design/01` §1, §3; `design/README.md` domain coverage table | Both missions explicit (frame delivery via FrameSet, camera control via engine actor). Single-session + back-facing-main-lens constraint codified in `open()` per D-01. All 7 key invariants mapped. |
+| A-02 | `domain-revised/02-frame-delivery.md` | **Partial** | `design/03` §2 / §4 / §5 / §8; `design/01` §4 | 30 fps, YUV capture, 10-step pipeline, RGBA16F, three subscribable streams, 480 px tracker, drop-on-busy, FrameResult 3 Hz heartbeat, dual stall watchdogs — all present. **Three gaps:** (a) FrameSet `CaptureMetadata` (ADR-18) omits the four per-frame convergence-state fields the domain §02 metadata table requires (`aeState`, `afState`, `awbState`, `flashState`) — C++ consumers reading convergence get silent zeros; (b) `sampleCenterPatch` (domain §02, 96 × 96 GPU sampling with trimmed-mean reduction) has no concrete design section — no Metal kernel, no readback path, no frame-clock hook; (c) FrameSet publication timing is inconsistent across files — `design/01` §4 and `ios-platform-guide/01` place publication in `addCompletedHandler`, while `design/02` §2/§3 pseudocode places it inline on `deliveryQueue` after `commit()` but before GPU completion. Pass-2 AT-01 details the correctness impact. |
+| A-03 | `domain-revised/03-camera-control.md` | **Pass** | `design/02` §4; `design/05` Phase 1b | All 6 controls + GPU color params designed. ISO/exposure coupled via `setExposureModeCustom(duration:iso:)`. `SETTINGS_CONFLICT` before first readback (Rule 3). WB gains clamped per G-10. GPU color chain in required order. Settings persistence via UserDefaults. |
+| A-04 | `domain-revised/04-concurrency-invariants.md` | **Partial** | `design/02` §6 invariant → iOS mechanism table | All 12 invariants mapped. Compile-time enforcement is genuine for invariants 1/2/3/7/8/10. Invariants 4, 6, 11 rely on a mix of mechanisms (ARC + `Unmanaged` + C++ flag for 4; same-queue writer + coherence for 6; acquire/release atomic for 11) — correct in substance. Invariant 6 is specifically underspecified: the design says "MTLBuffer single-writer via deliveryQueue" but does not specify double-buffered uniform slots or `setBytes` — see Pass-2 AT-06. |
+| A-05 | `domain-revised/05-resource-lifecycle.md` | **Partial** | `design/02` §5 state machine; `design/05` Phase 1a; `design/07` R-06/R-19/R-20 | Background drain, device-retain-across-pause, self-healing all good. **Two gaps:** (a) the explicit 7-step full teardown order (domain §05) is not enumerated in any design section — state machine and risk table reference it implicitly, but an implementer could release the GPU pipeline before stopping an active recording and not know the ordering is wrong; (b) the preview-surface rebind mechanism (3 consecutive swap-failure trigger, replace MTKView drawable without session teardown — domain §05) has no concrete design — no phase file, no Metal code sketch, no state-machine entry. |
+| A-06 | `domain-revised/06-error-and-recovery.md` | **Pass** | `design/07` §"Domain Edge-Case Mapping"; `design/02` §5 | All 19 error codes mapped 1:1. Exponential backoff 500/1000/2000/4000/8000 ms + 5-retry cap. Recovery sequence complete. HAL threshold = 5. Dual watchdogs (3 s informational, 5 s recovery). Self-heal for `CAMERA_IN_USE`. |
+| A-07 | `domain-revised/07-performance-budgets.md` | **Pass** | `design/03` §8 | Domain 07 is mostly stub. Design adds 30-fps sub-budget buckets (≤15 ms / 15–25 ms / >25 ms) and Instruments strategy. |
+| A-08 | `domain-revised/08-capture-and-recording.md` | **Partial** | `design/05` Phase 5; `design/03` Pass 5 / Pass 6; `design/07` R-06, R-15 | Still capture via Metal readback from `processedTex`, 8-bit TIFF via `CGImageDestination`, EXIF with `CamPlugin/v1` JSON, HEVC 8-bit via `AVAssetWriter` + NV12 IOSurface pool, no audio, 5 s drain deadline, in-flight-capture atomic. **One gap:** the `startRecording` return-value format `<uri>|<displayName>` (domain §10, first-`|` split rule) is not specified in Phase 5 design — the domain API contract constrains callers to parse this exact format. |
+| A-09 | `domain-revised/09-ui-behaviors.md` | **Partial** | `design/05` Phase 1a + Phase 6; `design/01` §2 | Split-screen preview, bottom bar, expanded controls, color sidebar, recording indicator, capture banner, state-driven UI, landscape-right lock, 3 Hz FrameResult — all present. **One gap:** the domain §09 debug-build log-level control has no placement in any phase file tree or acceptance criterion. Low severity (developer tool only). |
+| A-10 | `domain-revised/10-api-contract.md` | **Partial** | `design/05` Phase 6 + Phase 1a/1b; `design/01` §3; `design/04` §2 | All 16 host methods and 4 callbacks mapped to async engine surface + `AsyncStream` paths. Consumer registration via `engine.attach(consumer:, to: StreamId)`. Sendable POD data types modeled. **Three gaps:** (a) `sampleCenterPatch` Metal implementation missing (same as A-02b); (b) `SessionCapabilities.previewTextureId` / `.naturalTextureId` have no iOS equivalent — Flutter's texture-registry integer ID doesn't map cleanly to `MTKView` or `CVPixelBuffer` under SwiftUI; the design does not specify what these fields return (or whether they are preserved at all); (c) `setCropRegion` validation (crop must fit within capture resolution, reject with `INVALID_STATE`) is not in Phase 6 — Phase 6 only notes "commits new crop uniforms on next frame". |
+| A-11 | `domain-revised/11-what-not-to-port.md` | **Pass** | `design/06` D-01…D-09; `design/07` R-08; `design/README` | Every Android mechanism replaced with a native iOS primitive or deliberately excluded. OpenCV confirmed as new iOS capability. Audio absent end-to-end. No Android API name surfaces in `design/`. |
+| A-12 | `domain-revised/12-unresolved.md` | **Pass** | `design/07` R-13 / R-14 / R-17; `design/05` Phase 1a / 1b / 5 | U-08, U-09, U-11, U-16, U-18 all assigned to phases or flagged as accepted risk. |
 
-| # | Domain file | Coverage verdict | Notes |
-|---|---|---|---|
-| A-01 | `domain/01-system-purpose.md` | PASS | All 6 missions present: GPU preview (`MetalRenderer`), natural stream (`NaturalMetalViewWrapper`), C++ consumer fan-out (`ConsumerRegistry`), ISP JPEG still (`StillCaptureController`), GPU-processed still (`StillCaptureController`), HEVC/H.264 recording (`VideoRecorder`). Single-session, back-facing-main-only enforced in `CameraEngine.open()` guard. |
-| A-02 | `domain/02-frame-delivery.md` | PASS | 30fps target set. YUV 4:2:0 → Metal compute → BGRA8Unorm pipeline documented. All 4 output streams present: processed preview, tracker (480px height formula preserved verbatim), natural passthrough, encoder. Drop-on-busy via 1-slot mailbox in ConsumerRegistry. GPU-level 3s stall + capture-level 5s stall watchdogs designed. |
-| A-03 | `domain/03-camera-control.md` | PARTIAL — **[DEFERRED]** documented deviation, no design action needed. `domain/12-unresolved.md §U-11` rewritten as PARTIALLY RESOLVED (iOS `lensPosition` committed; per-device diopter calibration deferred to implementation if product wants real diopter display). | ISO/exposure coupling (auto-is-contagious) documented in `CameraSettings+Apply.swift`. Focus, white balance (3 modes), zoom ratio all present. Noise reduction / edge enhancement mapping acknowledged as TBD in R-20 ("silently ignored with warning log"). GPU 5-stage color pipeline all 5 stages present in compute kernel. Resolution selection present. **Gap:** domain/03 requires focus reported in diopters; design deviates to lensPosition (0–1), documented as known deviation in D-13 / R-13 — acceptable if product accepts deviation, but is a partial against the literal spec. |
-| A-04 | `domain/04-concurrency-invariants.md` | PASS | All 11 invariants mapped. Invariant 1 → Swift actor compiler enforcement. Invariant 7 → StillCaptureController actor guard-before-first-await. Invariant 9 → recovery retry logic vs full close in handleNonFatalError. Invariant 10 → ConsumerRegistry dispatch non-blocking (actor drop-on-busy). Invariant 11 → stall watchdog via `OSAtomicSomething` equivalent (last-frame timestamp). Full mapping table in `design/02-concurrency.md`. |
-| A-05 | `domain/05-resource-lifecycle.md` | PASS | 6-step init order and 8-step full teardown both modeled. Session-only teardown path present. GPU resource release safety documented (`CVMetalTextureCacheFlush` on memory warning). `backgroundSuspend()` calls `session.stopRunning()` synchronously. |
-| A-06 | `domain/06-error-and-recovery.md` | PASS | All fatal errors covered (PERMISSION_DENIED, MAX_RETRIES_EXCEEDED, RECORDING_START_FAILED, RECORDING_FAILED). Exponential backoff (500ms/1s/2s/4s/8s/8s+) present. Non-fatal → recovery path (5-retry cap). Domain/iOS handling mapping table in `07-ios-specific-risks.md` enumerates every domain edge case. Self-healing for CAMERA_IN_USE via KVO (Phase 6). |
-| A-07 | `domain/07-performance-budgets.md` | PASS | 30fps target. 8ms GPU fence budget. 3s/5s stall thresholds. 15fps degradation threshold (3-heartbeat monitor). ~49.5 MB frame buffer acknowledged. Frame budget table in `03-metal-pipeline.md` shows 33.33ms total budget with per-stage allocations. |
-| A-08 | `domain/08-capture-and-recording.md` | PARTIAL — **[DEFERRED]** to Phase 5 implementation by product decision. `domain/12-unresolved.md §U-09` rewritten as PARTIALLY RESOLVED (API + key settled; JSON schema defined during Phase 5 by comparing exact fields written by Android source). Recording is now **video-only** (no audio track) per product decision; Phase 5 file tree no longer includes `AudioSyncHandler.swift`. | ISP JPEG + GPU-processed capture both designed. EXIF fields documented in `EXIFWriter.swift` reference. HEVC preferred / H.264 fallback. 50 Mbps default. MP4 container. Recording state machine (IDLE→PREPARING→RECORDING→STOPPING→IDLE) modeled. **Gap:** EXIF user comment JSON schema under `"CamPlugin/v1"` key is explicitly deferred (R-17, NEEDS INVESTIGATION item 5) — schema undefined at design time. Minor gap, acceptable for design phase. |
-| A-09 | `domain/09-ui-behaviors.md` | PASS | Split-screen with natural left, processed right. Bottom bar with 5 controls. Expanded bar. Color calibration sidebar. Recording indicator (MM:SS). Capture banner. State-driven UI (8 session states → UI variants). Landscape-only. All SwiftUI components listed in module layout. |
-| A-10 | `domain/10-api-contract.md` | PASS | All 7 data types mapped (Size, CameraSettings with Optional fields, ProcessingParameters, SessionCapabilities, SessionState, ErrorCode, FrameResult, RgbSample). All 16 host methods mapped in Phase 5/6 coverage table. All 4 callbacks (onStateChanged, onError, onFrameResult, onEdgeDetectionResult) mapped. `nil` semantics preserved via Swift `Optional`. |
-| A-11 | `domain/11-what-not-to-port.md` | PASS | All 21 items confirmed absent in `07-ios-specific-risks.md` "Domain/11 Confirmation of Absence" table. Specifically: no JNI, no Pigeon, no Handler/Looper, no OpenGL ES, no Android codec name strings, no libjpeg-turbo, no fpng, no UV rotation matrix, no GTest. |
-| A-12 | `domain/12-unresolved.md` | PASS | All 17 unresolved items addressed. U-12 (front camera) → not in scope. U-13 (natural = display-only, no consumer path) → ConsumerRole enum has no Natural entry. U-15 (480px tracker) → formula preserved. U-17 (single session) → enforced by `CameraEngine.open()` guard. Remaining items documented in NEEDS INVESTIGATION section of `07-ios-specific-risks.md`. |
-
-**Category A verdict: YELLOW → GREEN (post-patch)** — 10 PASS, 2 PARTIAL both DEFERRED by product decision to implementation time. No FAIL.
+**Category A summary:** 7 pass, 0 fail, 5 partial.
 
 ---
 
 ## Category B — Design Completeness
 
-Is the design complete enough to hand to an implementer?
-
-| # | Item | Verdict | Notes |
+| # | Check | Verdict | Evidence |
 |---|---|---|---|
-| B-01 | All 6 phases have concrete file trees with real filenames (no placeholders) | PASS | `design/05-implementation-phases.md` has per-phase file trees naming every `.swift`, `.hpp`, `.cpp`, `.mm`, `.metal` file. Phase gate criteria are testable. |
-| B-02 | Every design decision has alternatives considered and a reversibility assessment | PASS | `design/06-decisions-log.md` has 15 decisions (D-01 through D-15). Each entry lists alternatives considered, chosen rationale, and explicit reversibility assessment. |
-| B-03 | All significant iOS-specific risks are documented with mitigations | PASS | `design/07-ios-specific-risks.md` has 27 risk entries (R-01 through R-27), a domain edge-case mapping table covering every entry from domain/06, a domain/11 absence confirmation table, and a NEEDS INVESTIGATION section. |
-| B-04 | The design contains no audit lookups (all values sourced from domain/) | PASS | `design/08-audit-lookups.md` documents 0 audit lookups with a full table showing each value was confirmed from domain/ directly. |
+| B-01 | Every phase in `design/05` has a concrete file tree | **Partial** | Phases 1a/1b/2/3/4/5 list real file paths; Phase 6 legitimately lists modifications-only. Phase 2 does not include `CenterPatchKernel.metal` or any file realizing the `sampleCenterPatch` host method referenced from Phase 1b ("requires Phase 2 sampleCenterPatch"). |
+| B-02 | Every phase has testable acceptance criteria | **Pass** | All six phases list empirically checkable bullets. |
+| B-03 | Every decision in `design/06` has ≥ 1 alternative considered | **Pass** | D-01 through D-09 each list 2–3 alternatives plus the "follow ADR-## as written" baseline. |
+| B-04 | `design/08-audit-lookups.md` exists and is plausibly complete | **Pass** | 0 entries, explicit justification. Far below the 10-entry yellow flag. |
+| B-05 | `design/07-ios-specific-risks.md` has required entries | **Partial** | Thermal / pressure / permission / revocation / multi-app / background / App Nap + domain edge-case mapping all present. Missing: **Low Power Mode** (`ProcessInfo.isLowPowerModeEnabled` not observed anywhere); G-18 BGRA-vs-RGBA gotcha not cited (see E-04). |
+| B-06 | All 8 design files exist | **Pass** | `README.md` + `01-architecture.md` through `08-audit-lookups.md` all present. |
 
-**Category B verdict: GREEN** — 4/4 PASS.
+**Category B summary:** 4 pass, 0 fail, 2 partial.
 
 ---
 
-## Category C — OpenCV Edge Detection
+## Category C — OpenCV Edge Detection Verification
 
-Does the design correctly specify the OpenCV integration?
-
-| # | Item | Verdict | Notes |
+| # | Check | Verdict | Evidence |
 |---|---|---|---|
-| C-01 | Zero-copy CVPixelBuffer handoff to ObjC++ bridge specified | PASS | `design/04-opencv-integration.md` shows `CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly)` → `CVPixelBufferGetBaseAddress` → `cv::Mat` wrapping the same memory — no copy. `CVBufferRetain` before dispatch, `CVBufferRelease` after `onFrame()` returns. Correct. |
-| C-02 | `cv::Canny` is specifically called (not a different edge detector) | PASS | `EdgeDetectionBridge.processFrame` explicitly calls `cv::Canny(gray, edges, _lowThreshold, _highThreshold)`. Thresholds settable from Swift via `-setLowThreshold:highThreshold:`. |
-| C-03 | **Correct OpenCV color conversion constant** for Metal output format | **FAIL → [PATCHED]** | `design/04-opencv-integration.md` line 242: was `cv::cvtColor(rgba, gray, cv::COLOR_RGBA2GRAY)`. Metal outputs `BGRA8Unorm` (design decision D-14, `03-metal-pipeline.md` texture spec table). **Patch applied:** changed to `cv::cvtColor(bgra, gray, cv::COLOR_BGRA2GRAY)`; `cv::Mat` variable renamed `rgba` → `bgra`; added a multi-line comment explaining why `COLOR_RGBA2GRAY` is wrong for Metal output. Verified via `grep COLOR_RGBA2GRAY design/` — only remaining match is the negative warning comment. |
-| C-04 | `cv::findContours` present to produce Sendable result type | PASS | `cv::findContours(edges, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE)` present. `RETR_EXTERNAL` retrieves only outermost contours — appropriate for edge overlay use case. |
-| C-05 | Phase 3 file tree lists all required ObjC++ bridge files | PASS | Phase 3 file tree includes `IFrameConsumer.hpp`, `EdgeDetectionConsumer.hpp`, `EdgeDetectionConsumer.cpp`, `EdgeDetectionBridge.h`, `EdgeDetectionBridge.mm`, `EdgeDetectionResult.swift`. Complete. |
-| C-06 | `EdgeDetectionResult` is `Sendable` and crosses the actor boundary safely | PASS | `EdgeDetectionResult` is a Swift struct with all `Sendable` fields (UInt64, [EdgeContour], Double, Int64). `EdgeContour` contains `[EdgePoint]`; `EdgePoint` has Int32 x/y. All `Sendable`. Thread transition chain (consumer thread → @MLProcessor → @MainActor) is long but correct. |
-| C-07 | OpenCV xcframework distribution choice documented with alternatives | PASS | D-05 in `design/06-decisions-log.md` documents CocoaPods, SPM, and source build as alternatives. xcframework chosen for official signing and no build-time toolchain dependency. |
+| C-01 | Generic `PixelSink` C++ interface with method signatures + lifecycle | **Pass** | `design/04` §1: `configure` / `processFrame` / `teardown` / `drainStats`, `overwriteCount_[3]`, all `noexcept`, `SWIFT_SHARED_REFERENCE` for ARC import. |
+| C-02 | Edge-detection consumer concretely designed | **Pass** | `design/04` §5–§8: specific OpenCV calls (`cv::cvtColor`, `cv::Canny`, `cv::resize`); explicit thread transitions; Canny 2–4 ms budget at 480 p on A16; exception translation. |
+| C-03 | Edge-detection consumer in Phase 3 file tree | **Pass** | `EdgeDetectionConsumer.{h,cpp}` + `CannyPreviewView` + `SharedTextureAllocator` + `MipmapBlitHelper` + `CannyPanZoom.metal` + `WriteCompleteCallback.h` all present. |
+| C-04 | OpenCV framework integration with justification | **Pass** | `design/06` D-04: pinned SPM `.binaryTarget` / `.xcframework`. Alternatives (CocoaPods, source build, vendored submodule) considered and rejected with rationale. |
+| C-05 | Zero-copy handoff with exact API calls | **Partial** | Input path is zero-copy (`IOSurfaceLock` / `CVPixelBufferLockBaseAddress` → `cv::Mat(…, base, stride)` → unlock). **But the composite path in §6 is not zero-copy**: `cv::resize` allocates `edgesFull`, and `compositeHalfFloat` does a full-res RGBA16F memcpy from processed base into the shared surface every frame (~15 MB at default crop). The §5 header promises zero-copy; the §6 body is one memcpy per frame. |
+| C-06 | Result return path to SwiftUI designed | **Partial** | Two shapes per `design/01` §5 and D-07: rendering consumers use shared IOSurface-backed `MTLTexture`; data consumers use Sendable structs via `AsyncStream`. Both match ADR-13 intent. **But the write-complete callback code in §6 violates Swift 6 strict concurrency** — accesses actor-isolated `CameraEngine` properties from `Task.detached` without `await`, and uses a `DispatchQueue.submit(…)` method that does not exist. See Pass-2 AT-05. |
 
-**Category C verdict: RED → GREEN (post-patch)** — 6/7 PASS, 1 **PATCHED** (C-03: `cv::COLOR_BGRA2GRAY`). Patch applied to `design/04-opencv-integration.md`; silent correctness bug eliminated before any implementation work began.
+**Category C summary:** 4 pass, 0 fail, 2 partial.
 
 ---
 
 ## Category D — Quality Checks
 
-| # | Item | Verdict | Notes |
+| # | Check | Verdict | Evidence |
 |---|---|---|---|
-| D-01 | No Android-specific API names remain in the design | PASS | Searched design files: no `DispatchQueue` misuse as Android analog, no `Handler`, `Looper`, `JNI`, `Pigeon`, `SharedPreferences`, `MediaStore`, `OpenGL`, `GLSurfaceView`, `SurfaceTexture`, `EGL`. All iOS-native APIs used throughout. |
-| D-02 | Zero audit lookups | PASS | `design/08-audit-lookups.md` confirms 0 lookups. The design derives all values from domain/ files and iOS SDK knowledge. |
-| D-03 | Internal cross-references are consistent | PASS | D-03 in decisions log references `03-metal-pipeline.md §GPU-to-Encoder Path` — section exists. R-07 references ObjC++ bridge strategy — present in `04-opencv-integration.md`. D-06 references `04-opencv-integration.md` for contour decision — confirmed. Phase numbers referenced in risk register (R-01: "Phase 1a, 4") match phase structure. |
-| D-04 | No orphaned requirements | PASS | Domain/12 unresolved items all addressed or deferred with explicit rationale. No domain requirement found that has no design counterpart. |
+| D-01 | No Android API names anywhere in `design/` | **Pass** | 0 hits for `Camera2`, `HandlerThread`, `CameraCaptureSession`, `CaptureRequest`, `SurfaceTexture`, `AHardwareBuffer`, `ImageReader`, `MediaRecorder`, `EGLContext`, `EGLSurface`, `Looper`, `backgroundHandler`, `mainHandler`. All `Handler` substring matches are iOS/Swift identifiers. |
+| D-02 | `design/08-audit-lookups.md` not over-consulted | **Pass** | 0 entries. |
+| D-03 | Cross-references consistent | **Partial** | Spot-checks on R-## / D-## / ADR-## cross-references all land correctly. **But** ADR-03 in `ios-platform-guide/01` states "processedTex has no display MTKView"; `design/01` §4 Pass 3b and `design/05` Phase 2 add a `processedMTKView` display blit. The deviation is **correct** (domain §09 mandates the split-screen), but it is undocumented in `design/06-decisions-log.md` — an implementer reading ADR-03 alone would build only the natural display path. See E-03. |
 
-**Category D verdict: GREEN** — 4/4 PASS.
+**Category D summary:** 2 pass, 0 fail, 1 partial.
 
 ---
 
-## Pass 1 Summary
+## Category E — Platform-Guide Compliance
 
-| Category | Items | GREEN | YELLOW | RED |
+| # | Check | Verdict | Evidence |
+|---|---|---|---|
+| E-01 | ADR citation coverage: every `design/0[1-7]-*.md` cites ≥ 1 ADR | **Pass** | Counts: 35 / 24 / 32 / 22 / 30 / 10 / 17. |
+| E-02 | ADR claim verification: cited ADRs match actual design | **Pass** | Spot-checks verify ADR-02, ADR-13, ADR-06 (compute not blit), ADR-04, ADR-09, ADR-16, ADR-18/19/20 are all honored in the design text, not just cited by ID. |
+| E-03 | Deviations are documented | **Fail** | `design/01` §2/§4 and `design/05` Phase 2 introduce a `processedMTKView` display path. ADR-03 in `ios-platform-guide/01` explicitly states "processedTex has no display MTKView — it feeds recording, still capture, and the async consumer subscription system only." The design's deviation is necessary (domain §09 requires the split-screen preview), but no `D-##` entry in `design/06-decisions-log.md` records the deviation. Per review rules, silent ADR deviation is a fail — even when the behavior is correct, the rationale and reversibility must be logged. |
+| E-04 | Gotcha coverage | **Partial** | Covered: G-01, G-02, G-03, G-04, **G-05**, G-07, **G-08**, G-10, G-11, G-12 / G-24, G-13, G-14, G-15, G-16, G-17 / G-22, **G-19**, **G-20**, **G-21**, G-23, G-25, G-26. **Missing:** G-06 (stop-on-interruption race) and G-18 (BGRA-vs-RGBA channel-order silent-bug). Substance of G-18 is right (pipeline is RGBA16F end-to-end with correct BT.709 weights), but a single-line citation would prevent a future editor from introducing a BGRA shortcut unseen. |
+| E-05 | No forbidden patterns | **Pass** | `MTLTexture.getBytes` and `.mm` appear only in prohibition text. `AVCaptureSession()` constructor only appears as R-19's not-this anti-pattern. `viewWillAppear` has no session-construction use. No synchronous C++ call from the capture delegate. |
+
+**Category E summary:** 3 pass, 1 fail, 1 partial.
+
+---
+
+## Summary Table
+
+| Category | Items checked | Passed | Failed | Partial |
 |---|---|---|---|---|
-| A — Requirements Coverage | 12 | 10 | 2 | 0 |
-| B — Design Completeness | 4 | 4 | 0 | 0 |
-| C — OpenCV Edge Detection | 7 | 6 | 0 | 1 |
-| D — Quality Checks | 4 | 4 | 0 | 0 |
-| **Total** | **27** | **24** | **2** | **1** |
+| A — Requirements Coverage | 12 | 7 | 0 | 5 |
+| B — Design Completeness | 6 | 4 | 0 | 2 |
+| C — OpenCV Edge Detection | 6 | 4 | 0 | 2 |
+| D — Quality Checks | 3 | 2 | 0 | 1 |
+| E — Platform-Guide Compliance | 5 | 3 | 1 | 1 |
+| **Total** | **32** | **20** | **1** | **11** |
 
-### Pre-Review Patch Verification
+---
 
-| Pre-review finding | Patched? | Evidence |
-|---|---|---|
-| C-01: GPU-to-encoder not zero-copy | YES | `03-metal-pipeline.md` §GPU-to-Encoder Path has complete IOSurface-backed pool with `kCVPixelBufferIOSurfacePropertiesKey` and `MTLBlitCommandEncoder` GPU blit. `MTLTexture.getBytes` explicitly forbidden. |
-| C-02: ConsumerRegistry struct copy bug | YES | `dispatch()` writes `consumers[role] = entry` in both the busy path (pending overwrite) and the idle path (before queue dispatch). |
-| C-03: MetalRenderer texture slot race | YES | `OSAllocatedUnfairLock<MTLTexture?>` specified in both `01-architecture.md` and `02-concurrency.md`. |
-| H-01: CMSampleBuffer crosses actor boundary | YES | `IncomingFrame: @unchecked Sendable` wrapper with `CVPixelBuffer` extracted pre-boundary specified in `02-concurrency.md`. |
+## Correctness Pass Verdict: **Yellow**
 
-### Correctness Verdict (as of Agent 4 review)
+Reasoning per the review rubric:
 
-**YELLOW**
+- **Not Red:** no Category C item fails; no Category A fail in the core-mission files (01 / 02 / 04 / 05); no forbidden-pattern violation; only one silent ADR deviation in Category E (the rubric requires 2+ deviations or other Red-class failures).
+- **Not Green:** one E-03 fail (silent ADR-03 deviation — `processedMTKView` is undocumented in the decisions log) + eleven partials clustered on real implementation gaps (FrameSet metadata fields, `sampleCenterPatch` not designed, teardown ordering not enumerated, surface-rebind not designed, output-URI format unspecified, `previewTextureId` gap, Low Power Mode missing, G-18 gotcha missing, composite step not zero-copy, Swift-6 callback compile error).
+- **Yellow** matches "1–2 silent ADR deviations" + "some partials, no critical failures" per the rubric.
 
-One hard correctness failure (C-03: wrong OpenCV color constant) is present. This is a new finding not from the pre-review; it will cause silently incorrect edge detection. The two Category A partials (diopter convention and EXIF schema) are documented deviations acceptable at design phase. All four pre-review critical findings are confirmed patched.
-
-### Post-Patch Correctness Verdict
-
-**GREEN**
-
-C-03 has been patched (`COLOR_BGRA2GRAY` + variable rename + warning comment in `design/04-opencv-integration.md`). The two Category A partials (A-03 diopter, A-08 EXIF JSON schema) are product-accepted deviations captured in `domain/12-unresolved.md §U-09, §U-11` — neither is a design defect. Zero FAIL items remain in the design; zero items need further design action before implementation.
+Route the fixes to `design/` (re-run Agent 3 once with Pass 1 + Pass 2 findings as
+combined context). None require changes to `domain-revised/` or
+`ios-platform-guide/`.

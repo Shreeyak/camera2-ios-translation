@@ -1,0 +1,62 @@
+# 07 — iOS-Specific Risks
+
+Risks introduced by the iOS platform choices and the associated mitigations. Each
+entry maps to a phase where mitigation is implemented.
+
+## Risk Table
+
+| Risk | Phase | Likelihood | Impact | Mitigation |
+|---|---|---|---|---|
+| **R-01 Thermal throttling (.serious, .critical)** | Phase 4 | High (any 30+ minute session on A16) | Preview fps drop, C++ consumer starvation (`overwriteCount_` climbs) | `ProcessInfo.thermalStateDidChangeNotification` + `device.systemPressureState` KVO (ADR-14). `.serious` → disable tracker consumer (`detach` rotates `trackerTex` back to `.private` if we generalize ADR-20; in this product, just skip Pass 4 and publish stale `FrameSet.tracker`). `.critical` → stop recording if active; reduce capture preset one step. UI surfaces a non-blocking "camera throttled" banner per domain §09. |
+| **R-02 System pressure → camera quality degradation** | Phase 4 | Medium | fps drop; AE fluctuates | KVO on `device.systemPressureState`; correlate with `FramePacingController` (ADR-07). `.shutdown` → fatal transition (maps to domain `CAMERA_DISCONNECTED`). |
+| **R-03 Camera permission denied** | Phase 1a | High on first launch | Session cannot open | `PermissionHandler` requests `.video` on `OPENING` entry (G-16); denial → fatal `PERMISSION_DENIED`; UI shows blocking dialog with "Open Settings" action (non-port of Android manifest rules; domain §06 fatal). |
+| **R-04 Permission revocation mid-session** | Phase 1a | Low | Session drops unexpectedly | Observe `AVCaptureDevice.authorizationStatus` on `scenePhase → .active`; if no longer `.authorized`, emit fatal `PERMISSION_DENIED` and transition to `CLOSED`. |
+| **R-05 Multi-app camera conflict (FaceTime, other camera apps)** | Phase 1a | Medium | Session interrupted mid-use | `AVCaptureSessionWasInterrupted` with reason `videoDeviceInUseByAnotherClient` → show "Resume" button; **do not auto-resume** per `ios-platform-guide/04 §Interruption reasons`. Auto-resume for `videoDeviceNotAvailableInBackground` and `videoDeviceNotAvailableDueToSystemPressure` only. |
+| **R-06 Background execution limits** | Phase 5 | High when recording | Corrupt MP4 (no `moov` atom) | `UIApplication.beginBackgroundTask(withName: "recording-drain")`; expiration handler calls `AVAssetWriter.cancelWriting` → empty file, not corrupt (ADR-16 + G-08). Non-recording path: `scenePhase == .background` triggers `sessionQueue.async { session.stopRunning() }` within ~1 s to satisfy G-19 App Store policy. |
+| **R-07 App Nap throttling** | Phase 4 | Low (camera session keeps `.active`) | Session-queue latency spikes | `@MainActor` remains `.active` while the user is in the app; engine's `sessionQueue` and `deliveryQueue` run at `.userInitiated` QoS to resist App Nap. Background → session stopped entirely; no App Nap window for camera. |
+| **R-08 OpenCV iOS header incompatibility with Swift-C++ interop** | Phase 3 | Medium | Build failure, compile-time explosion | Per ADR-11, OpenCV headers (`<opencv2/core.hpp>` etc.) are **never** imported by Swift. They are `#include`d only in `.cpp` files behind the `PixelSink` pimpl. Public `.h` contains only POD / `enum class` / C-ABI typedefs / `SWIFT_SHARED_REFERENCE`. If the OpenCV `.xcframework` contains an umbrella header Swift tries to import, wrap OpenCV in a submodule whose `module.modulemap` excludes it from the Swift-visible module. |
+| **R-09 CVPixelBuffer format mismatch (capture ≠ Metal expected)** | Phase 2 | Medium on older devices | Silent frame drops / wrong colors | At session config time, enumerate `device.formats` (G-17, G-22); pick biplanar 8-bit YUV at ≥30 fps at the target resolution; prefer `kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange`, fall back to the non-lossless variant (ADR-05). If neither is available, throw a named error at `open()` time rather than dropping frames silently. |
+| **R-10 `CVMetalTextureGetTexture` returns nil under memory pressure** | Phase 2 | Medium | Frames drop (not a crash) | ADR-15 + G-01: always nil-check; increment `metalWrapFailureCount`; drop frame. `CVMetalTextureCacheFlush` on `UIApplication.didReceiveMemoryWarningNotification` (ADR-04, G-15). |
+| **R-11 `MTLCommandBuffer` silent errors** | Phase 2 | Low–Medium | Corrupted output, no crash | G-02 + ADR-15: `addCompletedHandler` on **every** command buffer; check `.status == .error` and `.error`. On error → emit non-fatal `UNKNOWN_ERROR`, trigger recovery (domain §06). |
+| **R-12 Metal background submission → process termination** | Phase 1a + Phase 4 | High if mishandled | App Store rejection, app killed (`MTLCommandBufferErrorNotPermitted`) | ADR-09 + G-05: atomic `gpuSubmissionEnabled` gate; set to `false` on `scenePhase → .inactive`; the capture delegate guards `commit()` with this gate; pre-inactive, `lastCommittedCommandBuffer?.waitUntilScheduled()` ensures in-flight work is handed to the driver. |
+| **R-13 `lensPosition` is normalized [0,1], not diopters (U-11 partial)** | Phase 1b | High (UI mis-label) | User confusion; wrong EXIF | G-11: label the UI control "relative focus" not "diopters". Per-device calibration to convert to diopters is deferred; FrameResult reports the `[0, 1]` value directly (domain §03 and §10 use `double? [0.0, 1.0]`, matching native `lensPosition`). |
+| **R-14 AE FPS fallback when device doesn't support exact fixed-rate (U-16 partial)** | Phase 1b | Low on A16+ | Preview frame rate drifts | Preview mode: `activeVideoMinFrameDuration = activeVideoMaxFrameDuration = 1/30`. If the device rejects (checked via `device.activeFormat.videoSupportedFrameRateRanges`), fall back to the nearest supported range and emit a `FPS_DEGRADED` notification (domain §06). Empirical testing on target hardware decides final policy. |
+| **R-15 Photo library authorization crash** | Phase 5 | Medium | `PHPhotoLibrary.performChanges` crashes on iOS 14+ without authorization | G-04: check `PHPhotoLibrary.authorizationStatus(for: .addOnly)` and await `requestAuthorization(for: .addOnly)` before any `performChanges`. Denial is **non-fatal** for the camera session: fall back to writing to the app's `Documents` folder and surface a `UNKNOWN_ERROR` notification. |
+| **R-16 Status-bar camera indicator persists > 1 s after backgrounding (App Store policy)** | Phase 1a | Low if followed | App Store rejection | G-19: `session.stopRunning()` must complete before the `.background` view-layer task returns. Don't defer it. The `scenePhase → .background` handler blocks on `sessionQueue.sync { session.stopRunning() }` (acceptable because `.background` is off-screen; no UI responsiveness concern). |
+| **R-17 EXIF JSON schema for `"CamPlugin/v1"` (U-09 partial)** | Phase 5 | Low | Downstream tools that parse EXIF see empty `UserComment` | Defined during Phase 5; minimum field set = capture resolution, crop region, processing parameters (brightness/contrast/saturation/gamma/blackR/G/B), consumer configuration (tracker resolution). JSON schema documented in `Capture/EXIFWriter.swift` header. |
+| **R-18 Completion-handler race with teardown (G-20)** | Phase 2 | Medium | Use-after-free on readback buffers | ADR-10 §Completion-handler re-entrancy guard + G-20: capture `sessionState` + `sessionToken` at `commit()`; in `addCompletedHandler`, `Task { await engine.onFrameComplete(..., expectedState:, expectedToken:) }`; the actor method exits silently if state or token no longer match. |
+| **R-19 Reconfiguring session on every view appearance (G-07)** | Phase 1a | Medium (common mis-port) | 100–500 ms latency on every foreground | `AVCaptureSession` created **once** per `open()` (ADR-07). View lifecycle triggers `startRunning/stopRunning`, not `AVCaptureSession()` construction. Code-review rule enforced during Phase 1a. |
+| **R-20 `.private` MTLTexture nil IOSurface silently drops consumer frames (G-25)** | Phase 3 | Was-high-without-ADR-20 | Consumer receives zero frames, no error | ADR-20: `TexturePoolManager` allocates `.shared` IOSurface-backed textures when any subscriber is attached; rotates over one frame boundary. Verification: Phase 3 acceptance test reproduces the G-25 silent-drop, then confirms fix after ADR-20 rotation. |
+| **R-21 PixelSink consumer without per-stream drop counter (G-26)** | Phase 3 | Was-high-without-ADR-13/19 | Degradation to 5 Hz appears as "healthy" pipeline | ADR-13 + ADR-19 + G-26: every `PixelSink` exposes `std::atomic<uint64_t> overwriteCount_[3]` + `drainStats(StreamId) → StreamStats`; Swift polls at 1 Hz; counts surface in the debug overlay alongside thermal state. |
+
+## Domain Edge-Case Mapping (required section)
+
+Every edge case named in `domain-revised/06-error-and-recovery.md` mapped to its iOS
+handling location and mechanism:
+
+| Domain edge case | iOS handling location | Mechanism |
+|---|---|---|
+| Capture session configuration rejected (`CONFIGURATION_FAILED`) | `CameraEngine.open()` on `sessionQueue` | `session.canAddInput/canAddOutput` checks; on failure emit non-fatal; full teardown + reopen via recovery (domain §06) |
+| Camera device disconnected (`CAMERA_DISCONNECTED`) | `AVCaptureDevice.wasConnected` KVO + `AVCaptureSessionRuntimeErrorNotification` | Recovery (backoff 500–8000 ms); after 5 retries → `MAX_RETRIES_EXCEEDED` fatal |
+| Camera device access error (`CAMERA_ACCESS_ERROR`) | `AVCaptureSessionRuntimeErrorNotification` with `AVError.Code.mediaServicesWereReset` or similar | Recovery path |
+| 5 consecutive HW frame failures (`CAPTURE_FAILURE`) | `AVCaptureOutput.sampleBufferCallback` never fires (watched by `captureResultStallWatchdog` at 5 s, domain §06) OR Metal command buffer `.status == .error` accrues 5× in a row | Counter in `CameraEngine`; reset on successful frame; 5 → recovery |
+| GPU frame stall 3 s (`FRAME_STALL` informational) | `GpuStallWatchdog` (DispatchSourceTimer reading atomic `lastFrameTimestampNs`) | Emit `FRAME_STALL` non-fatal; no recovery (domain §06 disambiguation) |
+| Capture result stall 5 s (`FRAME_STALL` recovery) | `CaptureResultStallWatchdog` armed after first sample buffer (domain §02 Watchdog Lifecycle) | Emit `FRAME_STALL`; trigger full recovery |
+| AE not converged within 5 s (`AE_CONVERGENCE_TIMEOUT`) | KVO on `device.isAdjustingExposure` + timer | Emit notification-only (domain §06: "do not build recovery logic") |
+| FPS below 15 for 3 heartbeats (`FPS_DEGRADED`) | `FramePacingController` samples sensor-reported frame duration every 30 frames | Notification-only |
+| EOS drain timed out during recording stop (`RECORDING_TRUNCATED`) | `AVAssetWriter.finishWriting` with 5 s deadline (ADR-16) | `cancelWriting` → empty file; emit non-fatal; return URI |
+| Camera held by another process (`CAMERA_IN_USE`, self-healing) | `AVCaptureSessionWasInterrupted` reason `videoDeviceInUseByAnotherClient` → fatal `ERROR`; `InterruptionEnded` → self-heal by transitioning to `CLOSED` then auto-opening (domain §06 self-healing path) | This maps to the Android camera-availability notification (non-port item 11 §11-what-not-to-port). iOS native equivalent: the `InterruptionEnded` notification. |
+| Camera device policy (`PERMISSION_DENIED`) | `PermissionHandler` on `OPENING` | Fatal; no retry |
+| No camera matching ID (`CAMERA_NOT_FOUND`) | `AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)` returns `nil` | Fatal immediately at `open()` |
+| Max retries exhausted (`MAX_RETRIES_EXCEEDED`) | `CameraStateMachine` retry counter reaches 5 | Fatal |
+| Recording encoder init fails (`RECORDING_START_FAILED`) | `AVAssetWriter.startWriting()` returns `false` | Fatal |
+| Recording pipeline failure mid-session (`RECORDING_FAILED`) | `AVAssetWriter.status == .failed` during append | Fatal recording; session may continue if only recorder failed |
+| Settings combination inconsistent (`SETTINGS_CONFLICT`) | `DeviceController.applySettings` validates merged settings before lockForConfiguration | Synchronous reject; no state transition; no retry (domain §06) |
+| Unknown / unclassified error (`UNKNOWN_ERROR`) | Default branch in error classifier | Recovery path with backoff |
+
+## Cited ADRs
+
+ADR-08 (R-01, R-06, R-12, R-16: scenePhase lifecycle), ADR-09 (R-12: Metal background
+rule), ADR-11 (R-08: C++ interop containment), ADR-13 (R-21: PixelSink discipline),
+ADR-14 (R-01, R-02: KVO → AsyncStream), ADR-15 (R-10, R-11: nil-check, command buffer
+error), ADR-16 (R-06: AVAssetWriter deadline), ADR-20 (R-20: dynamic storage mode).
