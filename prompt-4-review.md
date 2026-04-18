@@ -111,6 +111,7 @@ CATEGORY D — Quality Checks
 - No Android API names appear anywhere in `design/` (grep for: `Camera2`, `Handler`, `Looper`, `SurfaceTexture`, `AHardwareBuffer`, `CaptureRequest`, `CaptureSession`, `ImageReader`, `MediaRecorder`, `backgroundHandler`, `mainHandler`, `EGLContext`, `EGLSurface`)
 - `design/08-audit-lookups.md` does not show signs of excessive audit consultation (more than 10 entries is a yellow flag suggesting `domain-revised/` was insufficient or the designer over-relied on Android specifics)
 - Cross-references between design files are consistent (sections referenced in one file exist in the referenced file)
+- **Traceability check:** Identify concrete facts in `design/` (numerical thresholds, buffer pool sizes, specific API choices, specific Swift type names, queue counts, shader pipeline decisions). Every such fact must trace to one of: (a) a `domain-revised/` requirement, (b) an `ios-platform-guide/` ADR or gotcha (cited by ID), (c) a `D-##` entry in `design/06-decisions-log.md`, or (d) a row in `design/08-audit-lookups.md`. An untraceable fact is a fail — it suggests either an undocumented design decision or an unlogged audit consultation. Focus sampling on areas that typically vary: specific numerical thresholds, buffer pool sizes, color matrix coefficients, pipeline queue counts, and Swift-level decisions (actor vs class, specific type names).
 
 ---
 
@@ -133,9 +134,9 @@ SUMMARY TABLE (at the end of `review/01-correctness-check.md`):
 | A — Requirements Coverage | 12 | | | |
 | B — Design Completeness | 4 | | | |
 | C — OpenCV Edge Detection | 6 | | | |
-| D — Quality Checks | 3 | | | |
+| D — Quality Checks | 4 | | | |
 | E — Platform-Guide Compliance | 5 | | | |
-| **Total** | **30** | | | |
+| **Total** | **31** | | | |
 
 CORRECTNESS PASS VERDICT:
 - **Green** — zero critical failures (all Category C items pass, no fails in A, B, or E)

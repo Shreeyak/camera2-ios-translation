@@ -60,6 +60,8 @@ The system must not block the GPU render loop waiting for readback completion. T
 
 Specific timeout values are platform measurements, not domain contracts; see `sla.md` / `measurements/` for measured values. Repeated fence timeouts indicate GPU performance degradation.
 
+**Publication ordering constraint**: FrameSet construction and the consumer mailbox swap must occur as the final action *inside* the GPU completion handler callback — after the fence signals GPU completion, not inline on any other execution context after the command buffer is committed. Submitting a command buffer only schedules GPU work; it does not guarantee GPU completion. Any implementation that swaps the mailbox before the completion handler fires delivers a FrameSet backed by uninitialized or stale pixel data. No assertion will fire; all consumer frames will be silently corrupt.
+
 [audit: 05-gpu-opengl.md §PBO Readback Protocol, 03-capture-pipeline.md §PBO Double-Buffer]
 
 ---
@@ -155,17 +157,7 @@ There is no backpressure mechanism that would cause the camera hardware to slow 
 
 ## Frame Stall Detection
 
-Two independent stall detection mechanisms run concurrently:
-
-**GPU-level stall** (monitors frame arrival at the GPU pipeline):
-- Threshold: **3000ms** of no frame arrival.
-- Check interval: **1000ms**.
-- On stall: emits a non-fatal `FRAME_STALL` error to the application layer. Does not trigger session recovery.
-
-**Capture-result-level stall** (monitors frame completion acknowledgments from the camera hardware):
-- Threshold: **5000ms** of no completion notification.
-- Check interval: **3000ms**.
-- On stall: triggers non-fatal error handling and recovery (full teardown and reinitialization).
+See `06-error-and-recovery.md` for detection thresholds and recovery behavior.
 
 **Watchdog lifecycle**:
 - Each watchdog is dormant until its first successful observation — first frame arrival for the GPU watchdog, first capture-result completion for the capture watchdog. Stalls cannot be reported before the first frame.
@@ -180,6 +172,37 @@ Two independent stall detection mechanisms run concurrently:
 
 The system periodically samples actual sensor metadata and emits it to the application layer at approximately **3 Hz** (every 10th completion notification at 30fps). This is used by the UI to display current ISO, exposure, focus, and white balance values.
 
-FPS monitoring runs on a separate heartbeat (every 30 completion notifications). If the computed fps from `frameDurationNs` falls below **15.0 fps** for **3 consecutive heartbeats**, a non-fatal `FPS_DEGRADED` notification is emitted.
+See `06-error-and-recovery.md` for detection thresholds and recovery behavior.
 
 [audit: 09-camera-controls.md §CamFrameResult Delivery, 08-error-recovery.md §FPS Degradation]
+
+---
+
+## Memory: Frame Buffer Formulas
+
+Frame buffer sizes depend on the operator-selected crop resolution and the working pixel format. Use these formulas:
+
+- `FRAME_WORKING_MB = crop_w × crop_h × bpp(format) / 1_048_576`
+  where `bpp(RGBA16F) = 8` (4 channels × 2 bytes/channel).
+- `READBACK_MB = FRAME_WORKING_MB × DOUBLE_BUFFER_DEPTH`
+  (double-buffering: depth = 2).
+- `TRACKER_WORKING_MB = tracker_w × tracker_h × bpp(format) / 1_048_576`
+  where tracker height is 480px and width is aspect-preserving from the crop region.
+
+**Tracker format is an open ADR**: the tracker stream may be delivered as RGBA16F (same as processed/natural), R16F (grayscale half-float), or R8 (grayscale 8-bit). The choice depends on consumer needs and affects `bpp`. Until the ADR is resolved, use RGBA16F (bpp=8) as the conservative estimate.
+
+All registered consumers receive a reference to the same frame allocation — no per-consumer copies.
+
+Concrete measured values belong in `measurements/`, not in domain.
+
+[audit: 01-system-topology.md §UI Overview (4160×3120 resolution), 03-capture-pipeline.md §Tracker Downscale, 06-cpp-sinks.md §IImagePipeline]
+
+---
+
+## Center-Patch Sampling
+
+`sampleCenterPatch()` reads a **96×96 pixel** patch from the center of the most recently rendered GPU-processed frame. The computation applies a histogram trimmed mean (discarding the top and bottom 10% of intensity values) to produce R, G, B mean values.
+
+This operation runs on the GPU rendering execution context and must not block the render loop. The result is delivered asynchronously via callback.
+
+[audit: 05-gpu-opengl.md §sampleCenterPatch, 04-pigeon-api.md §CameraHostApi]

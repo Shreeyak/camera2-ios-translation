@@ -19,6 +19,8 @@ Fatal errors place the session in the `"error"` state with no further recovery. 
 | Maximum retry budget exhausted | `MAX_RETRIES_EXCEEDED` |
 | Video encoder or muxer initialization failure | `RECORDING_START_FAILED` |
 | Video recording pipeline failure mid-session | `RECORDING_FAILED` |
+| Camera held by another process | `CAMERA_IN_USE` (self-healing restores when released) |
+| No camera matching the requested ID exists | `CAMERA_NOT_FOUND` |
 
 [audit: 08-error-recovery.md §Error Classification, 04-pigeon-api.md §CamErrorCode]
 
@@ -36,14 +38,21 @@ Non-fatal errors trigger the recovery path (exponential backoff retry) unless su
 | Platform-specific security bug after keyguard dismiss | `CAMERA_ACCESS_ERROR` | Full teardown and reopen |
 | 5 consecutive hardware-level frame failures | `CAPTURE_FAILURE` | Full teardown and reopen |
 | No frames for 5000ms (capture-result stall) | `FRAME_STALL` | Full teardown and reopen |
+| Unclassified error | `UNKNOWN_ERROR` | Full teardown and reopen with backoff |
+
+**Synchronous call rejection (no state transition, no retry):**
+
+| Condition | Error Code | Action |
+|---|---|---|
+| Settings combination is internally inconsistent | `SETTINGS_CONFLICT` | Call rejected; no state transition; no retry needed |
 
 **Recovery-suppressed (informational only):**
 
 | Condition | Error Code | Action |
 |---|---|---|
 | No frames at GPU level for 3000ms | `FRAME_STALL` | Notify application only; no recovery |
-| AE not converged within 5000ms | `AE_CONVERGENCE_TIMEOUT` | Notify application only; no recovery |
-| Frame rate below 15fps for 3 heartbeats | `FPS_DEGRADED` | Notify application only; no recovery |
+| AE not converged within 5000ms | `AE_CONVERGENCE_TIMEOUT` | Notification-only — do not build recovery logic. Diagnostic event, not actionable. |
+| Frame rate below 15fps for 3 heartbeats | `FPS_DEGRADED` | Notification-only — do not build recovery logic. Diagnostic event, not actionable. |
 | EOS drain timed out during recording stop | `RECORDING_TRUNCATED` | Notify application; return output URI |
 
 [audit: 08-error-recovery.md]
@@ -130,7 +139,7 @@ In both cases, the retry Runnable checks the current state before executing and 
 
 ---
 
-## HAL Error Threshold
+## Hardware Error Threshold
 
 Transient hardware-level frame capture failures are tolerated without triggering recovery. Recovery is triggered only after **5 consecutive** failures (without any successful frame in between).
 
@@ -157,6 +166,8 @@ Two independent stall detection mechanisms run concurrently. Their semantics dif
 - Emits `FRAME_STALL` and triggers full recovery.
 - The watchdog timer is initialized at session configuration time (not at device open time) to prevent false stalls during the initialization window before the first frame arrives.
 - The watchdog is cancelled during both types of teardown.
+
+**Disambiguation:** The recovery behavior is determined by which watchdog fires: the 3-second GPU-level stall is informational only (notify, no recovery); the 5-second capture-result-level stall triggers full recovery (teardown + reopen).
 
 [audit: 08-error-recovery.md §Stall Watchdog (CameraController), §Stall Watchdog (GpuPipeline)]
 
@@ -194,19 +205,16 @@ This path allows recovery from `"error"` state in the specific case of camera-in
 
 ## teardown vs. teardownSession
 
-The system has two teardown depths:
-
-| Full teardown | Session-only teardown |
-|---|---|
-| Closes camera device | Retains camera device |
-| Stops and releases active recording | Does not touch recording |
-| Used by: `close()`, recovery, fatal error, background suspend | Used by: `pause()` |
-| Resets all counters | Resets capture-session-level counters only |
-
-Both teardown paths:
-- Cancel stall watchdog.
-- Close capture session.
-- Stop GPU pipeline.
-- Release pipeline object (platform-defined mutual exclusion with in-flight captures).
+See `05-resource-lifecycle.md` for the full teardown and session-only teardown sequences and their ordering constraints.
 
 [audit: 08-error-recovery.md §teardown() vs teardownSession()]
+
+---
+
+## Resource Cleanup on Error Paths
+
+Any implementation that acquires a lock or exclusive handle over a platform resource (GPU surface, memory mapping, file descriptor) during frame processing must release that resource on **all code paths**, including error and exception paths. This requirement applies to both the GPU render pipeline and to consumer-side processing (e.g., C++ pipelines that acquire a surface lock before reading pixel data).
+
+**Required pattern**: Use RAII or equivalent scope-bound cleanup to guarantee release. Manual acquire/release pairs that omit the release on error branches permanently pin the resource: the GPU cannot write to a pinned surface slot, and the affected consumer lane produces zero frames with no error, no log, and no recovery trigger.
+
+A permanently pinned resource is behaviorally indistinguishable from a silent hang and is not recoverable without a full session restart. This is not an implementation-detail preference — it is a correctness requirement.
