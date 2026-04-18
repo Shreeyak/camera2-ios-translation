@@ -31,8 +31,6 @@ Both implementations are behaviorally equivalent; the downstream architect choos
 
 Still images must include correct EXIF orientation metadata. The orientation is computed from the sensor's physical mounting angle relative to the display orientation at capture time.
 
-For front-facing cameras, the display rotation is negated in the computation (mirrored behavior).
-
 [audit: 10-capture-recording.md §EXIF Orientation]
 
 ---

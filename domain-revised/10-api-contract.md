@@ -95,7 +95,7 @@ An enum identifying the category of error.
 | Code | Fatal? | Meaning |
 |---|---|---|
 | `CAMERA_NOT_FOUND` | yes | No camera matching the requested ID exists |
-| `CAMERA_IN_USE` | no | Camera is held by another process |
+| `CAMERA_IN_USE` | yes | Camera is held by another process; self-healing restores when released |
 | `PERMISSION_DENIED` | yes | User denied camera access |
 | `CAMERA_ACCESS_ERROR` | no | General camera access failure |
 | `CAMERA_DISCONNECTED` | no | Camera hardware disconnected |
@@ -104,15 +104,15 @@ An enum identifying the category of error.
 | `RECORDING_START_FAILED` | yes | Video encoder or muxer initialization failed |
 | `RECORDING_FAILED` | yes | Recording pipeline failed mid-session |
 | `RECORDING_TRUNCATED` | no | EOS drain timed out; recording may be incomplete |
-| `FRAME_STALL` | no | No frames delivered for the stall timeout duration |
+| `FRAME_STALL` | no | No frames delivered for the stall timeout duration. The recovery behavior is determined by which watchdog fires: the 3-second GPU-level stall is informational only (notify, no recovery); the 5-second capture-result-level stall triggers full recovery (teardown + reopen). |
 | `MAX_RETRIES_EXCEEDED` | yes | Retry budget exhausted after repeated non-fatal errors |
 | `UNKNOWN_ERROR` | no | Unclassified error |
 | `SETTINGS_CONFLICT` | no | Settings combination is internally inconsistent |
-| `INVALID_FORMAT` | no | Requested file format is not supported |
-| `FPS_DEGRADED` | no | Sustained frame rate has dropped below the acceptable threshold |
-| `AE_CONVERGENCE_TIMEOUT` | no | Auto-exposure has not converged within the timeout window |
+| `INVALID_FORMAT` | no | Requested file format is not supported. Reserved for future use. No current API accepts a user-selected format parameter. |
+| `FPS_DEGRADED` | no | Sustained frame rate has dropped below the acceptable threshold. Notification-only — do not build recovery logic. These are diagnostic events, not actionable errors. |
+| `AE_CONVERGENCE_TIMEOUT` | no | Auto-exposure has not converged within the timeout window. Notification-only — do not build recovery logic. These are diagnostic events, not actionable errors. |
 | `INVALID_STATE` | no | Operation attempted in an incompatible session state |
-| `HAL_ERROR` | no | Camera hardware abstraction layer reported an error |
+| `HARDWARE_ERROR` | no | Camera hardware reported an error |
 
 [audit: 04-pigeon-api.md §CamErrorCode]
 
@@ -216,7 +216,7 @@ Restarts the capture session after a `pause`. Transitions to `"opening"` → `"s
 ```
 backgroundSuspend(handle: Int) → void
 ```
-Called when the application becomes fully invisible. Releases all camera resources without emitting a user-visible state change. Suppresses any pending recovery retry.
+Notifies the pipeline that the app is entering background. The camera session is interrupted by the system; no teardown is performed. Inputs and outputs remain configured for automatic restoration on foreground. Suppresses any pending recovery retry.
 
 [audit: 04-pigeon-api.md §CameraHostApi, 07-state-machine.md §Background Suspend/Resume]
 
@@ -226,7 +226,7 @@ Called when the application becomes fully invisible. Releases all camera resourc
 ```
 backgroundResume(handle: Int) → void
 ```
-Called when the application returns to visible. If a camera was previously open, reopens it.
+Called when the app returns to foreground. The camera session self-restores via the system's interruption-ended notification.
 
 [audit: 04-pigeon-api.md §CameraHostApi]
 

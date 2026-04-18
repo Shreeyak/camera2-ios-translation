@@ -157,12 +157,7 @@ These parameters control the GPU shader applied to every frame in the processed 
 
 ## AE Convergence Timeout
 
-The system monitors auto-exposure convergence. If the auto-exposure system remains in a "searching" state beyond a platform-defined timeout:
-- A non-fatal `AE_CONVERGENCE_TIMEOUT` error is emitted to the application layer.
-- The error fires only once per convergence cycle (resets when AE resumes searching from a new trigger).
-- No recovery action is taken; this is informational.
-
-Specific timeout values are platform measurements, not domain contracts; see `measurements/` for measured values.
+See `06-error-and-recovery.md` for detection thresholds and recovery behavior.
 
 [audit: 08-error-recovery.md §AE Convergence Timeout, 07-state-machine.md §Key Constants]
 

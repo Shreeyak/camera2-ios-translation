@@ -147,3 +147,28 @@ it to the audit file(s) it was derived from. The downstream architect can consul
 | `10-capture-recording.md` | 08, 10, 11, 12 |
 | `11-build-config.md` | 07, 11, 12 |
 | `12-git-archaeology.md` | 01, 05, 11, 12 |
+
+---
+
+## Changelog
+
+### 2026-04-17 — Structure audit and error code cleanup
+
+**Faults fixed:**
+- F-A: Removed front-camera EXIF orientation from 08 (contradicted 01's scope)
+- F-B: Resolved backgroundSuspend contradiction in 05/10 — no teardown required on background; session is interrupted by the system and self-restores on foreground
+- F-C: Changed CAMERA_IN_USE to fatal-with-self-healing in 10 (consistent with 05/06)
+
+**Error codes:**
+- Renamed HAL_ERROR → HARDWARE_ERROR (removed Android-specific "HAL" terminology)
+- Added disambiguation to FRAME_STALL (3s informational vs 5s recovery)
+- Marked INVALID_FORMAT as reserved for future use
+- Added SETTINGS_CONFLICT to 06 error tables (was referenced in 03 but missing)
+- Added CAMERA_NOT_FOUND to 06 fatal table (was in 10 but missing from 06)
+- Added UNKNOWN_ERROR to 06 non-fatal table (had no classification)
+- Marked AE_CONVERGENCE_TIMEOUT and FPS_DEGRADED as notification-only
+
+**Simplifications:**
+- S-A: Gutted 07 (duplicated thresholds); moved unique content to 02
+- S-B: Deduplicated stall/AE/FPS descriptions (canonical location: 06)
+- S-C: Replaced teardown comparison table in 06 with cross-reference to 05

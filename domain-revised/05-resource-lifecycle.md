@@ -22,7 +22,7 @@ The following resources must be created in this order. Later stages depend on ea
 
 ## Full Teardown Order (close / release / recovery)
 
-Full teardown releases all resources including the camera device. Used on explicit `close()`, fatal error, recovery retry, and application background-suspend.
+Full teardown releases all resources including the camera device. Used on explicit `close()`, fatal error, and recovery retry.
 
 1. Cancel stall watchdog and any pending retry timers.
 2. Stop active recording (if any) — encoder and muxer are finalized before other resources are released.
@@ -115,7 +115,7 @@ When the camera view disappears, halt the capture session. No resource teardown 
 
 **System-initiated lifecycle (platform interruptions):**
 The platform independently signals camera interruptions when the app backgrounds, another process takes the camera, or system pressure forces GPU access restrictions. Observe and classify these signals; do not proactively tear down in response:
-- Camera unavailable because app is in background: await platform restoration; no teardown action required.
+- Application goes to background: the camera session is interrupted by the system. No teardown is required — inputs and outputs remain configured. On return to foreground, the session self-restores via the system's interruption-ended notification. The host calls `backgroundResume()` to confirm readiness.
 - Camera taken by another process: surface a manual resume control to the user; await user intent or platform restoration signal.
 - System resource pressure: surface "camera unavailable" indicator; await restoration signal.
 
