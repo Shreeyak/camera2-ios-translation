@@ -76,6 +76,19 @@ check_m2_d_anchors() {
 
 check_m2_d_anchors
 
-# M3-M8 added in subsequent tasks
+check_m3_skeletons_build() {
+    local pkg="$ARCH/api-skeletons"
+    [[ -d "$pkg" ]] || { fail "M3: api-skeletons/ missing"; return; }
+
+    if swift build --package-path "$pkg" >/tmp/m3.log 2>&1; then
+        pass "M3: api-skeletons swift build succeeded"
+    else
+        fail "M3: api-skeletons swift build failed (see /tmp/m3.log)"
+    fi
+}
+
+check_m3_skeletons_build
+
+# M4-M8 added in subsequent tasks
 
 finish
