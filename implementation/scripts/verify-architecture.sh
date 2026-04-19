@@ -129,9 +129,11 @@ check_m5_scaffolding_pairs() {
     yamls=$(awk '/^---$/{f=!f; if(f)print "---"; next} f' "$index")
 
     # Collect all introduced and retired slugs across all stages.
+    # Filter out '---' multi-doc separators yq emits between documents
+    # (same workaround used below for the depends_on graph).
     local introduced retired
-    introduced=$(echo "$yamls" | yq eval-all '.scaffolding_introduced[]?' - | sort -u)
-    retired=$(echo "$yamls" | yq eval-all '.scaffolding_retired[]?' - | sort -u)
+    introduced=$(echo "$yamls" | yq eval-all '.scaffolding_introduced[]?' - | grep -v '^---$' | sort -u)
+    retired=$(echo "$yamls" | yq eval-all '.scaffolding_retired[]?' - | grep -v '^---$' | sort -u)
 
     local ok=1
     # Every introduced must appear in retired.

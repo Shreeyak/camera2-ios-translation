@@ -102,6 +102,30 @@ file. See `ios-platform-guide/README.md` for the ADR and gotcha index. Update th
 hand when platform conventions change; do not try to "extract" these from the Android
 source — they're iOS-native.
 
+## Positive-spec discipline for architecture files
+
+Downstream agents read `implementation/architecture/*.md` without the upstream
+conversation. State what the system **is**, not what it **isn't**. Phrases like "not
+diopters", "Android used X, iOS has no equivalent", "no bit-pack workaround", "we
+previously considered Z" are conversation leftovers — they only parse if the reader knows
+the rejected alternative was on the table, and the downstream reader doesn't.
+
+Contexts where negative statements *are* justified:
+
+- `decisions.md` rows and their inline `## D-##` anchors — a D-## is literally "we chose X
+  over Y because Z"; naming Y is the point of the entry.
+- `open-questions.md` — records question resolutions; naming the rejected option answers
+  the question.
+- **Load-bearing guardrails** in concern files — rejections that prevent a
+  misimplementation a reader would plausibly reach for given the platform docs the file
+  cites (e.g., "`MTLTexture.getBytes` is forbidden on this path" citing ADR-06; "No
+  `AVCapturePhotoOutput`" citing G-09). Such rejections must cite the ADR or gotcha they
+  guard against; a rejection without that cite is probably a conversation leftover.
+
+Anywhere else, drop the negation and state the chosen shape positively. Before writing
+"not X" / "no X" / "Android did X, iOS does Y" in a concern file, ask: *would a downstream
+reader reach for X given only the platform docs this file cites?* If no, cut it.
+
 ## Reviewer discipline
 
 Agent 4 (ARCHITECTURE REVIEW) never reads `audit/`. If the reviewer finds a gap, the
