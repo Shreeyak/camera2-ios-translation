@@ -30,6 +30,37 @@ let sessionQueue = DispatchQueue(label: "camera.session", qos: .userInitiated)
 recreate `AVCaptureSession()` on every `viewWillAppear` / scene transition — it incurs
 full hardware re-init latency. See G-07.
 
+### Swift 6 delegate class declaration (ADR-02 / ADR-07)
+
+Under Swift 6 strict concurrency, the `AVCaptureVideoDataOutputSampleBufferDelegate`
+conforming class requires four specific attributes — each is load-bearing and omitting
+any one produces a compile error or a latent data race. `final`: no subclass can
+inadvertently inherit actor isolation from a parent, keeping the conformance isolation
+unambiguous. `NSObject`: AVFoundation's delegate protocol is Objective-C; without it
+the method is not visible to the runtime dispatcher. `@unchecked Sendable`: the
+`CMSampleBuffer` and `AVCaptureOutput` arguments are not compiler-verified `Sendable`,
+but the delivery-queue discipline — one dedicated serial queue, no concurrent access —
+makes it safe; this is the one legitimate use of `@unchecked Sendable` described in
+G-27 ("`@unchecked Sendable` silences the diagnostic but not the data race") because
+the queue contract is real and documented. `nonisolated`: the method is invoked on
+AVFoundation's `sampleBufferCallbackQueue`, not on `@MainActor` or the engine actor;
+marking it `nonisolated` states that explicitly rather than letting the compiler
+infer a wrong isolation domain.
+
+```swift
+final class SampleBufferDelegate: NSObject, @unchecked Sendable,
+                                   AVCaptureVideoDataOutputSampleBufferDelegate {
+    // Called on AVCaptureSession.sampleBufferCallbackQueue, NOT MainActor.
+    nonisolated func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        // hand off via AsyncStream continuation; no direct actor calls here.
+    }
+}
+```
+
 ---
 
 ## ADR-08: scenePhase semantics
@@ -45,6 +76,9 @@ to the wrong action causes intermittent bugs:
 
 **Do not use `scenePhase == .background` as the GPU gate** — by that point, the GPU
 resource may already be revoked and your process terminated. Gate on `.inactive`.
+
+- Session lifecycle calls (`startRunning`/`stopRunning`) are dispatched on `sessionQueue`
+  with async+timeout from `@MainActor`; never `sessionQueue.sync` from MainActor. See ADR-30.
 
 **Do not use `scenePhase == .inactive` as the session stop** — it fires on notification
 banners, and stopping the camera for a notification banner is unacceptable UX.
