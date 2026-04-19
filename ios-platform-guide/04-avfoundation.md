@@ -40,6 +40,52 @@ by binding start/stop to view lifecycle only.
 
 ---
 
+## ADR-30: AVCaptureSession lifecycle via async with timeout; never sessionQueue.sync from MainActor
+
+`AVCaptureSession.startRunning()` and `stopRunning()` block 100–500 ms (G-03). They run
+on `sessionQueue` (ADR-07). From `@MainActor`, calling
+`sessionQueue.sync { session.stopRunning() }` can deadlock: if `sessionQueue` is
+mid-flight in a `sessionQueue.async { startRunning }` dispatched by a scenePhase
+transition (ADR-08), the sync call from main waits for the async to finish, and if that
+async then dispatches any UI update back to the main actor, we have a two-party deadlock.
+The same hazard applies to any `@MainActor` call that `dispatch_sync`s onto a serial
+queue that also calls back onto the main actor.
+
+**Correct shape:** dispatch lifecycle calls asynchronously and await completion via a
+continuation, bounded by a timeout:
+
+```swift
+// correct — from @MainActor
+func stopCaptureSession(timeout: Duration = .seconds(2)) async throws {
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                self.sessionQueue.async {
+                    self.session.stopRunning()
+                    cont.resume()
+                }
+            }
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw CaptureError.sessionLifecycleTimeout
+        }
+        _ = try await group.next()
+        group.cancelAll()
+    }
+}
+```
+
+```swift
+// forbidden — never call sessionQueue.sync from @MainActor
+sessionQueue.sync { session.stopRunning() }
+```
+
+Cross-references: ADR-07 (sessionQueue), ADR-08 (scenePhase → stops session), G-03
+(`startRunning` blocks 100–500 ms).
+
+---
+
 ## Interruption reasons
 
 Register for both notifications:
@@ -156,6 +202,30 @@ deinit invalidates" — enforced by the compiler, not by convention.
 the project's isolation conventions; the class holds no mutable state today,
 but the annotation is kept so that future additions don't need to reintroduce
 it.
+
+### Strict-concurrency requirements
+
+Under Swift 6 strict concurrency, the KVO-to-AsyncStream adapter must satisfy three
+invariants — all of which the `Tokens`-box pattern above already satisfies:
+
+1. **No strong `self` capture in observer closures.** KVO observers and their target
+   retain each other; a strong `self` capture inside the stream-producer closure creates
+   a cycle that never invalidates. The pattern above uses `Self.snapshot(device)` (a
+   static call — no `self` at all). If you refactor to an instance method, use
+   `[weak self]` explicitly.
+
+2. **`onTermination` must release the observation-owning reference.** When a consumer
+   ends its `for await` loop the stream must tear down the KVO registration promptly,
+   not wait for the containing actor's `deinit`. The `cont.onTermination = { _ in _ = box }`
+   line achieves this: the continuation's storage drops the last reference to `box`, whose
+   `deinit` calls `invalidate()` on every token. Ensure `onTermination` is always set
+   before the first `yield` to avoid a race on immediate cancellation.
+
+3. **Cancel the consuming `Task` deterministically in the owning actor's `close()` path.**
+   Do not rely on actor `deinit` ordering to drive stream cancellation. The `Tokens.deinit`
+   teardown is fine (it's not an actor), but the `Task { for await ... }` consumer is
+   owned by the actor; cancel it explicitly in `close()` so that observation ends at a
+   well-defined point in the session lifecycle.
 
 Consume on `@MainActor`:
 
@@ -302,23 +372,32 @@ Both should be observed; the intersection drives degradation policy.
 
 ---
 
-## Background recording drain
+## Background recording drain (ADR-16 integration)
 
-If recording is active when backgrounding begins, `AVAssetWriter.finishWriting` can
-take several seconds. If the process is suspended mid-drain, the MP4 is permanently
-corrupted (no `moov` atom).
+### Background during active recording
 
-Request background time:
+When `scenePhase → .background` fires with an active `AVAssetWriter`:
+
+1. Request a background-execution extension via
+   `UIApplication.shared.beginBackgroundTask(expirationHandler:)`.
+2. The expiration handler **always calls `cancelWriting`**, never `finishWriting`. An
+   interrupted `finishWriting` produces a corrupt MP4 with no `moov` atom (G-08).
+3. `finishWriting` has exactly two legitimate call sites: (a) the user stops recording
+   before any backgrounding, and (b) the recording was paused pre-background and a
+   foreground-resume continuation explicitly drives the `finishWriting`. It is never
+   allowed to race the expiration handler.
+4. UX consequence: a recording interrupted by OS backgrounding produces no file. The
+   user-facing language is "recording cancelled by system"; partial files are not surfaced.
 
 ```swift
-let task = UIApplication.shared.beginBackgroundTask(withName: "recording-drain") {
-    // expiration handler — cancel rather than leave a corrupt file
+let bgTask = UIApplication.shared.beginBackgroundTask(withName: "recording-drain") {
+    // expiration handler — always cancel, never finishWriting (G-08)
     assetWriter.cancelWriting()
-    UIApplication.shared.endBackgroundTask(task)
+    UIApplication.shared.endBackgroundTask(bgTask)
 }
-await recorder.stop()           // finishWriting + deadline (see ADR-16)
-UIApplication.shared.endBackgroundTask(task)
+await recorder.stop()           // drives finishWriting with a timeout deadline (see ADR-16)
+UIApplication.shared.endBackgroundTask(bgTask)
 ```
 
-Cancelling on expiration produces a clean (empty) file rather than a partial corrupt
-one. See G-08.
+Cancelling on expiration produces a clean (empty) file rather than a partial corrupt one.
+See G-08, ADR-16 (`03-metal.md`).
