@@ -17,11 +17,20 @@ between stages, not by a compiler.
 
 | Stage | Prompt file | Reads | Writes |
 |---|---|---|---|
-| 1 AUDIT | `prompt-1-audit.md` | `packed/`, `reference/`, `screenshots/` | `audit/` (13 files, Android-structured facts) |
-| 2 EXTRACT | `prompt-2-extract.md` | `audit/` only | `domain/` (13 files, platform-neutral requirements) |
-| 2.5 MANUAL REVIEW | (human) | `domain/` | `domain-revised/` (manually reviewed & corrected domain files) |
-| 3 DESIGN | `prompt-3-design.md` | `domain-revised/` (what) + `ios-platform-guide/` (how) + `audit/` escape hatch | `design/` (9 files, iOS architecture citing ADR-## by ID) |
-| 4 REVIEW | `prompt-4-review.md` | `domain-revised/` + `ios-platform-guide/` + `design/` only | `review/` (3 files, Green/Yellow/Red verdict) |
+| 1 AUDIT | `prompt-1-audit.md` | `packed/`, `reference/`, `screenshots/` | `audit/` |
+| 2 EXTRACT | `prompt-2-extract.md` | `audit/` only | `domain/` |
+| 2.5 MANUAL REVIEW | (human) | `domain/` | `domain-revised/` |
+| 3 ARCHITECT | `implementation/prompts/agent-3-architect.md` | `domain-revised/` + `ios-platform-guide/` | `implementation/architecture/` + `implementation/stages/` |
+| 3.5 MECHANICAL | `implementation/scripts/verify-architecture.sh` | Agent 3 output | `implementation/review/mechanical.md` |
+| 4 ARCHITECTURE REVIEW | `implementation/prompts/agent-4-review.md` | Agent 3 output + mechanical.md | `implementation/review/` (verdict) |
+| 5 BRIEF WRITER | `implementation/prompts/agent-5-brief-writer.md` | Reviewed architecture + stages | `implementation/briefs/` |
+| 5.5 MECHANICAL | `implementation/scripts/verify-briefs.sh` | Agent 5 output | (stdout) |
+| 6 IMPLEMENT | Claude Code (separate repo) | `implementation/briefs/` + `implementation/architecture/` + `ios-platform-guide/` | Swift code + tests + `state.md` |
+
+The Agent 3/4/5 pipeline and its two verify scripts are designed per
+`docs/superpowers/specs/2026-04-19-implementation-pipeline-design.md` and built by
+`docs/superpowers/plans/2026-04-19-implementation-pipeline.md`. `implementation/README.md`
+orients at the subdirectory level.
 
 `ios-platform-guide/` is a human-authored input to Agent 3 (not produced by any agent). It
 contains platform-level ADRs (ADR-01 … ADR-29) and gotchas (G-01 … G-30). Update it by hand
@@ -66,16 +75,14 @@ grep -rn -E 'because Camera2|Android equivalent|iOS equivalent|Kotlin|the Androi
 grep -rn -E 'Camera2|CameraCaptureSession|CaptureRequest|HandlerThread|SurfaceTexture|AHardwareBuffer|ImageReader|MediaRecorder|EGLContext' domain-revised/
 grep -rn -E 'because Camera2|Android equivalent|iOS equivalent|Kotlin|the Android version' domain-revised/
 
-# After Agent 3 (DESIGN): audit lookups stayed bounded, OpenCV consumer is designed.
-cat design/08-audit-lookups.md                     # >10 entries = yellow flag
-grep -l 'cv::Canny\|EdgeDetection' design/04-opencv-integration.md
+# After Agent 3 (ARCHITECT): run mechanical checks M1-M8. Must pass before Agent 4 runs.
+./implementation/scripts/verify-architecture.sh implementation/
 
-# After Agent 3 (DESIGN): every design file cites at least one ADR from ios-platform-guide/.
-# Run separately; each file (01..07) should report ≥ 1.
-for f in design/0[1-7]-*.md; do echo "$f: $(grep -cE 'ADR-[0-9]+' "$f")"; done
+# After Agent 4 (ARCHITECTURE REVIEW): extract verdict.
+grep -E 'Verdict: (Green|Yellow|Red)' implementation/review/README.md
 
-# After Agent 4 (REVIEW): extract verdict.
-head -20 review/README.md                          # look for Green / Yellow / Red
+# After Agent 5 (BRIEF WRITER): run mechanical checks M1-M5 on briefs/.
+./implementation/scripts/verify-briefs.sh implementation/
 ```
 
 There is no build, no linter, and no test runner. The grep commands above *are* the test suite.
@@ -134,8 +141,12 @@ docs → features → chore) so that each stage can be reverted independently.
 - `clean-room-convo.md` — design conversation with every branch point and rationale. Read
   first if you need to understand *why* the pipeline is shaped this way.
 - `docs/superpowers/specs/2026-04-12-clean-room-prompt-redesign-design.md` — formal spec
-  (language rules, classification discipline, escape hatch rules).
+  for Agents 1-2 (language rules, classification discipline, escape hatch rules).
 - `docs/superpowers/plans/2026-04-12-clean-room-prompt-redesign.md` — implementation plan
-  used to build the 4 prompts.
+  used to build the first 4 prompts.
+- `docs/superpowers/specs/2026-04-19-implementation-pipeline-design.md` — formal spec for
+  the Agent 3/4/5 pipeline (architecture + stages + briefs; M-bar/J-bar discipline).
+- `docs/superpowers/plans/2026-04-19-implementation-pipeline.md` — implementation plan
+  used to build the Agent 3/4/5 prompts and the two verify scripts.
 - `reference/` — Android source docs copied by `setup.sh`; `reference/CLAUDE.md` is the
   *source* project's CLAUDE, not this project's.

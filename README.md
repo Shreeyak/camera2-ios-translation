@@ -57,14 +57,23 @@ Use the orchestrator prompt (drafted in this conversation — not yet saved to a
 
 ---
 
-## The 4 Agents
+## Pipeline Agents
 
 | # | Agent | Reads | Writes | Job |
 |---|-------|-------|--------|-----|
-| 1 | **AUDIT** | Android source, git, reference docs, screenshots | `audit/` (13 files) | Factual documentation of the Android system — no iOS terminology, no translation |
-| 2 | **EXTRACT** | `audit/` only | `domain/` (13 files) | Translate to platform-neutral behavioral requirements using strict language rules and mandatory grep self-audit |
-| 3 | **DESIGN** | `domain/` (primary) + `audit/` (logged escape hatch) | `design/` (9 files) | Design iOS app from first principles, embedding iOS expertise injected via prompt |
-| 4 | **REVIEW** | `domain/` + `design/` only | `review/` (3 files) | Two-pass review: correctness + adversarial red team. Produces Green/Yellow/Red verdict. |
+| 1 | **AUDIT** | Android source, git, reference docs, screenshots | `audit/` | Factual documentation of the Android system — no iOS terminology, no translation |
+| 2 | **EXTRACT** | `audit/` only | `domain/` | Translate to platform-neutral behavioral requirements using strict language rules and mandatory grep self-audit |
+| 2.5 | **MANUAL REVIEW** (human) | `domain/` | `domain-revised/` | Human pass to repair gaps and tighten language before architecture design runs |
+| 3 | **ARCHITECT** | `domain-revised/` + `ios-platform-guide/` | `implementation/architecture/` + `implementation/stages/` | Two-phase run: produce iOS architecture (9 concern files + 4 registers + compiling SwiftPM skeleton), then stage-index walking from zero to target |
+| 3.5 | **MECHANICAL (scripted)** | Agent 3 output | `implementation/review/mechanical.md` | `verify-architecture.sh` runs M1–M8 checks (file presence, D-## anchors, swift build, `touches:` validity, scaffolding pairs, cycles, constants, interaction shape tags) |
+| 4 | **ARCHITECTURE REVIEW** | Agent 3 output + mechanical.md | `implementation/review/` | Judgement-level J1–J5 review → Green/Yellow/Red verdict; Green required to unblock Agent 5 |
+| 5 | **BRIEF WRITER** | Reviewed architecture + stages | `implementation/briefs/` | Per-stage implementation briefs (12-section schema, FLAGGED/HITL/DEFERRED testability classes) |
+| 5.5 | **MECHANICAL (scripted)** | Agent 5 output | (stdout) | `verify-briefs.sh` runs M1–M5 (section headings, anchor resolution, retire-matches-introduced, test class fields, FLAGGED retry chain) |
+
+Agents 3/4/5 live under `implementation/prompts/`; scripts live under `implementation/scripts/`.
+The full design rationale for the new pipeline is in
+`docs/superpowers/specs/2026-04-19-implementation-pipeline-design.md`, and the plan that
+built it is in `docs/superpowers/plans/2026-04-19-implementation-pipeline.md`.
 
 ---
 
@@ -168,8 +177,12 @@ After each agent, run these checks before proceeding:
 ## Background Reading
 
 - **`clean-room-convo.md`** — Summary of the design conversation with every major branch and decision point. Read this first if you want to understand WHY the pipeline is structured this way.
-- **`docs/superpowers/specs/2026-04-12-clean-room-prompt-redesign-design.md`** — Formal spec with language rules, classification discipline, escape hatch rules, and the full architecture.
-- **`docs/superpowers/plans/2026-04-12-clean-room-prompt-redesign.md`** — Implementation plan used to build the 4 prompts.
+- **`docs/superpowers/specs/2026-04-12-clean-room-prompt-redesign-design.md`** — Formal spec for Agents 1-2 with language rules, classification discipline, and escape hatch rules.
+- **`docs/superpowers/plans/2026-04-12-clean-room-prompt-redesign.md`** — Implementation plan used to build the first 4 prompts.
+- **`docs/superpowers/specs/2026-04-19-implementation-pipeline-design.md`** — Formal spec for the Agent 3/4/5 pipeline (architecture outputs, stage index schema, M-bar / J-bar discipline).
+- **`docs/superpowers/plans/2026-04-19-implementation-pipeline.md`** — Implementation plan used to build the Agent 3/4/5 prompts and the two verify scripts.
+- **`implementation/README.md`** — Subdirectory orientation for Agent 3/4/5 artifacts.
+- **`docs/paper-simulation-scenephase-drain.md`** — Full schema-walkthrough paper simulation that stress-tested the Agent 3 output schema before building the prompt.
 
 ---
 
