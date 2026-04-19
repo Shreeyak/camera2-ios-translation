@@ -3,6 +3,7 @@
 > Status: draft, awaiting user review
 > Date: 2026-04-19
 > Precedes: implementation plan (to be written via `superpowers:write-plan`)
+> Target model: Opus 4.7 with 1M context window
 
 ## Problem
 
@@ -12,11 +13,11 @@ The repo has an upstream 2.5-agent pipeline that ends at `domain-revised/` (manu
 - **Agent 2 (EXTRACT)** — `audit/` → `domain/`
 - **(manual review)** — `domain/` → `domain-revised/`
 
-This spec defines the three agents that come next, replacing the current Agent 3 and Agent 4 prompts and introducing a new Agent 5:
+This spec defines the three agents that come next:
 
-- **Agent 3 (ARCHITECT + STAGE MAPPER)** — reads `domain-revised/` + `ios-platform-guide/`, produces `architecture/` (target iOS design) and `stages/stage-index.md` (ordered stage journey).
-- **Agent 4 (ARCHITECTURE REVIEW)** — reads Agent 3's output, runs grep-based mechanical checks and judgement-based review, emits a Green/Yellow/Red verdict in `review/`. Gates Agent 5.
-- **Agent 5 (BRIEF WRITER)** — reads reviewed architecture + stage index, produces `briefs/stage-NN.md` corpus as a single coherent run.
+- **Agent 3 (ARCHITECT + STAGE MAPPER)** — reads `domain-revised/` + `ios-platform-guide/`, produces `architecture/` (target iOS design) and `stages/stage-index.md` (ordered stage journey). Runs in two sequential phases within one prompt: architecture-first, then stages.
+- **Agent 4 (ARCHITECTURE REVIEW)** — gated by a mechanical-verification script; if the script passes, Agent 4 runs judgement-level review and emits a Green/Yellow/Red verdict in `review/`.
+- **Agent 5 (BRIEF WRITER)** — reads reviewed architecture + stage index, produces `briefs/stage-NN.md` corpus as a single coherent run (or chunked if N > 12).
 
 Claude Code CLI then implements the app stage-by-stage in a **separate repository**, reading `implementation/` and `ios-platform-guide/` from this repo as external reference.
 
@@ -25,6 +26,7 @@ Claude Code CLI then implements the app stage-by-stage in a **separate repositor
 **In scope**
 - Defining Agents 3, 4, 5: inputs, outputs, quality bars, failure modes.
 - Defining the stage-brief schema, `state.md` handoff, and per-stage gate.
+- Defining the architecture-amendment path when implementation discovers gaps.
 - Defining the `implementation/` directory layout in this repo.
 
 **Out of scope**
@@ -35,10 +37,11 @@ Claude Code CLI then implements the app stage-by-stage in a **separate repositor
 
 ## Constraints
 
-1. Coding agent is **Claude Code CLI**. It reads briefs and architecture from `implementation/`, writes Swift and tests in a separate repo, runs builds, commits.
-2. **Hard gate per stage**: build + unit tests must pass before the next stage begins. Tests that aren't possible at a given stage are explicitly flagged (not silently skipped).
+1. Coding agent is **Claude Code CLI** running **Opus 4.7 with 1M context window**. All design choices assume abundant context; fragmentation is not a concern, but per-stage context *budget* still matters for focus.
+2. **Hard gate per stage**: build + unit tests must pass before the next stage begins. Tests that aren't possible at a given stage are explicitly flagged with one of four classes (TESTABLE / FLAGGED / HITL / DEFERRED), not silently skipped.
 3. **Heavy upfront design**: architecture + stage journey + review happen before any Swift is written.
 4. **Starts from `domain-revised/`**. Upstream pipeline is fixed.
+5. **Target devices**: iPad Pro M1, iPad 11 (A16). HITL tests specify which device.
 
 ## Pipeline shape
 
@@ -47,72 +50,105 @@ domain-revised/ + ios-platform-guide/
     │
     ▼
 [Agent 3: Architect + Stage Mapper]
+    Phase A: architecture (freeze)
+    Phase B: stages
     │
-    ├── architecture/   (9 concern + 3 registers + api-skeletons/)
+    ├── architecture/   (9 concern + 4 registers + api-skeletons/)
     └── stages/stage-index.md
     │
     ▼
+[verify-architecture.sh]            ← mechanical gate; LLMs are bad at counting
+    │  if FAIL → Agent 3 reruns
+    │  if PASS ↓
+    ▼
 [Agent 4: Architecture Review]
-    │  runs: (a) mechanical grep checks, (b) judgement-based review
-    └── review/   (Green / Yellow / Red verdict + findings)
+    judgement-level only (J-bars)
     │
+    └── review/   (Green / Yellow / Red verdict + findings)
+    │  ≥3 consecutive Yellow iterations → human review gate
     ▼  (gate: verdict must be Green)
     │
-[Agent 5: Brief Writer — single coherent run]
+[Agent 5: Brief Writer]
+    single coherent run if N ≤ 12;
+    chunked run with explicit handoff if N > 12
     │
     └── briefs/   (stage-01.md … stage-N.md + state-template.md + README.md)
     │
     ▼
 [Claude Code, stage loop, in separate repo]
+    │  any unscripted decision touching a load-bearing concern
+    │  triggers an architecture amendment commit back here
+    └──────────────► (loop back to verify-architecture.sh for amended section)
 ```
 
-### Why Agent 5 is a single run, not per-stage
+### Why Agent 5 is a single run (bounded)
 
-Stages are deeply interconnected: stage 3's scaffolding is retired in stage 7, stage 7's `Tests preserved:` list must name stage 3's actual tests, and each stage's `Starting state:` depends on what prior stages left behind. A Brief Writer running per-stage in parallel has no cross-stage context. A single run threads scaffolding→migration pairs, predicts entry `state.md` per stage, and avoids cross-stage contradictions.
+Stages are deeply interconnected: stage 3's scaffolding is retired in stage 7, stage 7's `Tests preserved:` list must name stage 3's actual tests, and each stage's `Starting state:` depends on what prior stages left behind. A single run threads scaffolding→migration pairs, predicts entry `state.md` per stage, and avoids cross-stage contradictions.
+
+**Chunking fallback:** If Agent 3 produces N > 12 stages, Agent 5 runs in two chunks (stages 1..⌈N/2⌉, then ⌈N/2⌉+1..N). The second chunk receives the full first-chunk output as context plus an explicit handoff doc summarizing: final-state after chunk 1, live scaffolds at chunk boundary, tests-on-file at chunk boundary, unretired scaffolding IDs. Cross-chunk invariants (scaffolding retirement, tests preserved) are re-verified after both chunks complete.
 
 ### Stage structure (walking skeleton)
 
 Stages are hybrid: some are **feature stages** (add user-visible capability, possibly via scaffolding shortcuts), some are **migration stages** (behavior preserved; structure moves toward target architecture).
 
-**Cadence heuristic** (Agent 3 follows):
-- No more than **2 consecutive FEATURE stages** before a MIGRATION stage, OR
-- No stage may enter with more than **3 live scaffolds** in `state.md`.
+**Cadence — starting heuristic, revisit after first end-to-end run:**
+- Prefer no more than 2 consecutive FEATURE stages before a MIGRATION, OR
+- Prefer no stage enters with more than 3 live scaffolds.
+- These are preferences, not hard rules. Agent 3 may violate them with a one-line justification in the stage-index prose body.
 
-Stage 1 must produce something visible (e.g., bare camera preview on screen with an empty bottom bar). Later stages rewire the walking skeleton toward the target architecture and add features incrementally.
+Stage 1 must produce something visible (e.g., bare camera preview on screen with an empty bottom bar).
+
+### Scaffolding ID convention
+
+Every scaffold has an ID of the form `<stage-number>:<kebab-case-slug>` (e.g., `02:crude-inactive-stop`). The slug must appear:
+- in the stage's `scaffolding_introduced:` YAML list,
+- as a comment or heading in the scaffold code (for grep-findability),
+- in the retiring stage's `scaffolding_retired:` field.
 
 ## Agent 3 — Architect + Stage Mapper
 
+### Sequential-phase prompt discipline
+
+Agent 3 works in two **internally sequential phases** within one prompt:
+
+- **Phase A: Architecture.** Produce all files under `architecture/`. Freeze. No stage thinking.
+- **Phase B: Stage mapping.** Given the frozen architecture, produce `stages/stage-index.md`. May reference architecture anchors; may not revise architecture content.
+
+Agent 4 can issue Yellow on Phase B alone, in which case Agent 3 reruns Phase B only (architecture stays frozen).
+
 ### Inputs
 - `domain-revised/*.md` (12 files + README + CHANGES)
-- `ios-platform-guide/*.md` (6 files)
-- System prompt: mapping rules, ADR citation/deviation discipline, cross-input interaction surfacing. Lists **three** canonical interaction examples (see "Interactions considered" below).
+- `ios-platform-guide/*.md` (files + README + CHANGELOG)
+- System prompt: mapping rules, ADR citation/deviation discipline, cross-input interaction surfacing, scaffolding ID convention, sequential-phase discipline. Lists three canonical interaction examples.
 
 ### Outputs — `architecture/`
 
-Nine **concern files** (numeric prefix, prose + decisions inline) + three **register files** (no numeric prefix, structural indexes) + **`api-skeletons/`** (compiling stubs):
+Nine **concern files** (numeric prefix, prose + decisions inline) + four **register files** (no numeric prefix, structural indexes) + **`api-skeletons/`** (compiling stubs):
 
 | File/dir | Kind | Purpose |
 |---|---|---|
-| `README.md` | register | Nav, cross-file interaction map, "Interactions considered" subsection, **Phase coverage table** (every `domain-revised/*` → stages that implement it) |
-| `01-system-shape.md` | concern | Swift module/file map, target layout, public vs internal boundary, where each top-level type lives. **Most-cited file.** |
-| `02-concurrency.md` | concern | Actor topology, queues, scenePhase gate, 12 domain invariants mapped to Swift 6 primitives. **Load-bearing.** Must include the concurrency contract table. |
+| `README.md` | register | Nav, cross-file interaction map, "Interactions considered" subsection, **Phase coverage table**, **Primary-owner rule** |
+| `01-system-shape.md` | concern | Swift module/file map, target layout, public vs internal boundary |
+| `02-concurrency.md` | concern | Actor topology, queues, scenePhase gate, 12 domain invariants → Swift 6 primitives. Includes **concurrency contract table** and **cross-subsystem sequencing** subsections. |
 | `03-camera-session.md` | concern | `AVCaptureSession` config, device/format selection, resolution, orientation, interruption, self-healing, background suspend/resume |
-| `04-metal-pipeline.md` | concern | Per-frame Metal command graph, `CVMetalTextureCache`, RGBA16F working format, color-transform shader order, `FrameSet` schema, tracker downsample |
-| `05-consumers.md` | concern | `PixelSink` registration, C++ interop, pool sizing, latest-wins mailboxes, natural-stream subscription with `.private`→`.shared` interaction |
-| `06-capture-and-recording.md` | concern | Still capture + video recording (both paths); `AVAssetWriter`, IOSurface pool, NV12 compute pass, state machine, drain timeout, HEVC-only |
-| `07-settings.md` | concern | Partial-update merge, ISO/exposure coupling, persistence, `ProcessingParameters` update path |
-| `08-ui.md` | concern | SwiftUI root, `@Observable` ViewModel, two `MTKView`s, split preview, bottom bar, calibration sidebar, landscape-right |
-| `09-errors-and-recovery.md` | concern | Error taxonomy + fatal/non-fatal classification + recovery state machine + exponential backoff + dual watchdog |
-| `api-surface.md` | register | Swift SDK signatures index (data types, 16 methods, 4 callbacks). Prose summary + pointers into `api-skeletons/`. |
-| `decisions.md` | register | Hybrid format: one-line entry for minor deviations; **full ADR-style (Context / Options / Consequences / Reversibility)** for consequential ones (load-bearing, irreversible, or structural). Full inline rationale stays in the concern file. |
-| `open-questions.md` | register | Deferred U-## items (decided / deferred-to-phase / why). Quarantines what architecture did not decide. |
-| `api-skeletons/` | compilable | Swift/C++ stubs with `fatalError("Stage N")` bodies. Locks signatures and isolation annotations, not behavior. Parsed as a SwiftPM target so `swift build` validates structure. |
+| `04-metal-pipeline.md` | concern | Per-frame Metal command graph, texture cache, RGBA16F, `FrameSet`, tracker downsample |
+| `05-consumers.md` | concern | `PixelSink` registration, C++ interop, pool sizing, latest-wins, `.private`→`.shared` |
+| `06-capture-and-recording.md` | concern | Still + video: `AVAssetWriter`, IOSurface pool, NV12 compute, state machine, drain, HEVC-only |
+| `07-settings.md` | concern | Partial-update merge, ISO/exposure coupling, persistence |
+| `08-ui.md` | concern | SwiftUI, ViewModel, two `MTKView`s, split preview, calibration sidebar |
+| `09-errors-and-recovery.md` | concern | Error taxonomy, recovery state machine, backoff, dual watchdog |
+| `api-surface.md` | register | Swift SDK signatures index (prose summary + pointers into `api-skeletons/`) |
+| `decisions.md` | register | Hybrid: one-line for minor deviations; full ADR-style (Context / Options / Consequences / Reversibility) for consequential ones |
+| `constants.md` | register | Table: `Name \| Value \| Cite \| Owning concern \| Rationale`. All load-bearing numeric values (drain timeout, backoff delays, watchdog intervals) live here; concern files cite `constants.md#<name>`. |
+| `open-questions.md` | register | Deferred U-## items |
+| `api-skeletons/` | compilable | SwiftPM target: Swift/C++ stubs with `fatalError("Stage N")` bodies. `swift build` passes. |
 
 **Principles:**
-- Organize by iOS framework/subsystem, not behavioral concern.
-- Three register files are structural indexes (non-numeric prefix signals the difference).
-- Decisions inline + index in `decisions.md`.
-- `api-skeletons/` converts prose signatures into compilable scaffolding — the single biggest leverage for Claude Code's per-stage job.
+- Organize by iOS framework/subsystem.
+- Register files are structural indexes (non-numeric prefix).
+- Decisions inline in concern files + index in `decisions.md`.
+- Numeric values live exclusively in `constants.md`.
+- `api-skeletons/` locks signatures + isolation annotations, not behavior.
 
 ### Outputs — `stages/stage-index.md`
 
@@ -120,118 +156,149 @@ Single ordered file. Each stage is a YAML-frontmatter block + prose body:
 
 ```yaml
 ---
-stage: 03
-title: Rewire preview through Metal
+stage: 05
+title: Proper scenePhase gate
 type: MIGRATION          # FEATURE | MIGRATION
-depends_on: [01, 02]
-touches: [04-metal-pipeline, 08-ui]
+depends_on: [02]         # must include any stage referenced in scaffolding_retired
+touches: [02-concurrency, 04-metal-pipeline, 08-ui]
 scaffolding_introduced: []
-scaffolding_retired: [01:AVCaptureVideoPreviewLayer]
-tests_preserved: [01:preview-visible-within-2s, 02:engine-transitions-to-streaming]
+scaffolding_retired: [02:crude-inactive-stop]
+tests_preserved: [02:engine-transitions-to-streaming, 03:preview-visible-within-2s]
 ---
 ```
 
-Prose body holds `Visible:` description and notes. No `driver.sh` — tooling that needs the count uses `yq` on the frontmatter directly.
+Prose body holds `Visible:` description and (if cadence heuristic violated) a one-line justification.
+
+### Cross-subsystem sequencing (required subsection of `02-concurrency.md`)
+
+Any policy that orders actions across ≥2 concern files (e.g., `.background` → gate → stop session → drain recording) lives here. Format: named sequence with each step citing the subsystem's concern file.
 
 ### Concurrency contract table (required subsection of `02-concurrency.md`)
 
-Three columns; rows not fixed to invariants 1:1 — one primitive often enforces several.
+Three columns; rows not fixed to invariants 1:1.
 
 | Mechanism | Invariants enforced | Failure mode if violated |
 |---|---|---|
-| (example) `CameraEngine` actor — serial execution context | I-1, I-2 (camera state mutations) | Two concurrent `open()` calls race; session ends in inconsistent state |
+| (example) `CameraEngine` actor | I-1, I-2 | Concurrent `open()` races |
 
-Every row must cite `ADR-##` or introduce a `D-##`. Mechanical check: no blank cells, every row cited.
+Every row cites `ADR-##` or `D-##`. No blank cells.
 
 ### Interactions considered (required subsection of `README.md`)
 
-5–10 entries. Agent 3's prompt names **three canonical examples** to orient it toward different shapes:
+≥3 entries spanning ≥2 interaction shapes. Each entry must carry an explicit shape tag from: `concurrency×lifecycle`, `storage×consumer`, `error×recovery`, `resource×teardown`, `settings×session`, `ui×state`. Entries may be "no interaction found" for a shape.
 
-> **Ex1 (concurrency × lifecycle):** scenePhase `.inactive` × `MTLCommandBuffer` submission outstanding → Metal background rule; must gate submission before teardown.
-> **Ex2 (storage × consumer):** U-13 natural-stream subscribability reversal × ADR-20 `.private`→`.shared` on consumer attach × G-25 → D-07: consumer registration must handle storage-mode transition or silently drops frames.
-> **Ex3 (error × recovery):** HAL `ERROR_CAMERA_DEVICE` × recovery backoff × watchdog lifecycle → recovery must disarm watchdog before retry or self-arms into retry loop.
+System prompt names three canonical examples:
+- **concurrency×lifecycle**: scenePhase `.inactive` × outstanding `MTLCommandBuffer` → Metal background rule (ADR-09).
+- **storage×consumer**: U-13 × ADR-20 × G-25 → consumer-registration must handle `.private`→`.shared` transition.
+- **error×recovery**: HAL error × backoff × watchdog lifecycle → recovery must disarm watchdog before retry.
 
-"No interaction" is a valid outcome.
+### Primary-owner rule (required in `README.md`)
+
+Verbatim text:
+
+> Every architectural decision has exactly one primary-owner file. Cross-references in other concern files must be labeled `(see X#anchor for the authoritative statement)` and must not repeat decision content.
+
+### Phase coverage table (required in `README.md`)
+
+Schema: `domain file | primary concern(s) | implementing stage(s)`. Every `domain-revised/NN-*.md` file appears as one row. Used by Agent 4 (J1) and Claude Code (scope sanity check).
 
 ### Forbidden
-- No Swift code in prose files (signatures allowed in `api-surface.md`; full stubs in `api-skeletons/`).
+- No Swift code in prose files (signatures allowed in `api-surface.md`; stubs in `api-skeletons/`).
 - No reading of other directories.
 - No silent deviations from `ios-platform-guide` ADRs.
+- No numeric values inline in concern files — cite `constants.md#<name>` instead.
 
 ### Quality bars
 
-Split into two layers: **mechanical** (grep/tool-verifiable, can be run by a shell script) and **judgement** (Agent 4 interprets).
+Split into **mechanical** (checked by `verify-architecture.sh` before Agent 4 runs) and **judgement** (Agent 4 checks). Each judgement bar names its mechanical proxy if one exists.
 
-**Mechanical (5)**
-- M1. Every file in `architecture/` table exists. Every numeric file has the expected number prefix.
-- M2. Every `D-##` in `decisions.md` has a matching inline anchor in its owning concern file.
-- M3. `swift build --package-path architecture/api-skeletons/` succeeds.
-- M4. Every stage's `touches:` field names a real concern file.
-- M5. Every `scaffolding_introduced` entry has a matching `scaffolding_retired` in a later stage's YAML; no cycles in `depends_on`.
+**Mechanical (M1-M8) — scripted**
+- M1. Every file in the outputs table exists with the expected prefix.
+- M2. Every `D-##` in `decisions.md` has a matching inline anchor in its owning concern file (grep).
+- M3. `swift build --package-path architecture/api-skeletons/` exits 0. Package uses Swift 6 language mode with strict concurrency.
+- M4. Every stage YAML `touches:` names a real concern file.
+- M5. Every `scaffolding_introduced: [S:slug]` has a matching `scaffolding_retired: [S:slug]` in a later stage; no cycles in `depends_on`.
+- M6. Every `scaffolding_retired: [S:slug]` implies S ∈ `depends_on` for that stage.
+- M7. `constants.md` has no entries with blank cells.
+- M8. Every "Interactions considered" entry carries a shape tag from the allowed list.
 
-**Judgement (5)**
-- J1. Every `domain-revised/*` requirement maps to at least one architecture section (verified via Phase coverage table in README).
-- J2. Every architecture decision cites an `ADR-##` or creates a `D-##` with rationale inline.
-- J3. `02-concurrency.md` concurrency contract table has no blank cells; every row cited; primitives are plausible.
-- J4. `README.md` "Interactions considered" has ≥5 entries spanning ≥2 interaction shapes (not all of the same kind).
-- J5. Migration stages have non-empty `tests_preserved` and the named tests are plausible to exist by that stage.
+**Judgement (J1-J5) — Agent 4**
+- J1. Every `domain-revised/*` requirement maps to at least one architecture section (proxy: Phase coverage table filled for every domain file).
+- J2. Every architecture decision cites `ADR-##` or creates a `D-##` with rationale (proxy: grep for decision verbs like `chose`, `must`, `selected`, `requires`, `uses`, `prefers` and flag any such paragraph without a nearby `ADR-##`/`D-##`).
+- J3. `02-concurrency.md` concurrency contract table rows are plausible (primitives match Swift 6 idioms; no obvious miscitations).
+- J4. "Interactions considered" entries are real, not contrived; ≥3 entries spanning ≥2 shape tags.
+- J5. Migration stages' `tests_preserved` name tests that are plausible to exist by that stage.
 
 ## Agent 4 — Architecture Review
 
 ### Inputs
-- `architecture/` (all files from Agent 3, including `api-skeletons/`)
+- `architecture/` (all files, after `verify-architecture.sh` passes)
 - `stages/stage-index.md`
-- `domain-revised/` + `ios-platform-guide/` (originals, for verification)
-- System prompt: review criteria, verdict rubric
+- `domain-revised/` + `ios-platform-guide/` (for J1-J5 verification)
+- `review/mechanical.md` (output of `verify-architecture.sh`)
 
 ### Outputs — `review/`
 
 ```
 review/
-├── README.md         # top-level Green/Yellow/Red verdict + summary
-├── mechanical.md     # M1-M5 pass/fail, output of grep/swift-build checks
-├── judgement.md      # J1-J5 per-bar assessment with evidence
-└── findings.md       # actionable issues (Yellow/Red only)
+├── README.md           # top-level Green/Yellow/Red verdict + summary
+├── mechanical.md       # verify-architecture.sh output (produced before Agent 4 runs)
+├── judgement.md        # J1-J5 per-bar assessment with evidence
+└── findings.md         # actionable issues (Yellow/Red only)
 ```
 
 ### Verdict rubric
-- **Green**: all M1-M5 pass AND all J1-J5 pass. Agent 5 may run.
-- **Yellow**: all M1-M5 pass; at least one J-bar is Yellow but none are Red (e.g., Interactions considered has only 4 entries, or one concern file has thin decision rationale). Agent 3 reruns with findings; Agent 5 blocked until Green.
-- **Red**: any M-bar fails, OR any J-bar is Red (missing concern file, domain requirement unmapped, cycle in dependencies, `swift build` on api-skeletons fails). Agent 3 reruns.
+- **Green**: `verify-architecture.sh` passes AND all J1-J5 pass. Agent 5 may run.
+- **Yellow**: script passes; at least one J-bar flagged as "marginal" but none are Red. Agent 3 reruns the relevant phase (A or B) with findings; Agent 5 blocked.
+- **Red**: script fails OR any J-bar is Red. Agent 3 reruns.
+
+### Iteration bound
+
+After **3 consecutive Yellow verdicts** on the same run, the pipeline halts and flags a **human-review gate**. The human either:
+- overrides the Yellow to Green (documenting why in `review/findings.md`), or
+- replaces one or more J-bars with a narrower, more mechanical check, or
+- kicks the spec back (not the agent run) for schema changes.
+
+This prevents Yellow oscillation on fuzzy J-bars.
 
 ### What Agent 4 does NOT do
+- Does not re-run mechanical checks (the script already did).
 - Does not read the Swift implementation repo (there is none yet).
-- Does not re-decide architecture. Flags in `findings.md`; Agent 3 reruns.
-- Does not produce briefs or state.md templates.
-
-### Quality bars for Agent 4 itself
-- Every M-bar and J-bar is checked, with evidence cited.
-- Yellow vs Red distinction is consistent across runs.
-- Findings are actionable (name file + section to fix).
+- Does not re-decide architecture — flags in `findings.md`; Agent 3 reruns.
 
 ## Agent 5 — Brief Writer
 
 ### Inputs
-- `architecture/` (Green-verdict version only)
+- `architecture/` (Green-verdict version)
 - `stages/stage-index.md`
-- `review/` (context on what was flagged/fixed)
+- `review/` (context)
 - `domain-revised/` (citation only)
 
 ### Outputs — `briefs/`
 
-- `README.md` — **implementer read-path** (see below), glossary, cross-stage index
+- `README.md` — source-of-truth paragraph, implementer read-path, stage-kickoff template, glossary
 - `stage-01.md … stage-N.md` — one per stage, numbered 12-section schema
 - `state-template.md` — initial shape for `state.md`
 
-### Implementer read-path (required in `briefs/README.md`)
+### Source-of-truth paragraph (required in `briefs/README.md`)
 
-Hard context budget on what Claude Code reads per stage. One paragraph, verbatim:
+Verbatim (positive constraint, not negative):
 
-> For stage N, read only: (1) this brief (`stage-NN.md`), (2) the architecture refs the brief cites by anchor, (3) the domain refs the brief cites, (4) the `api-skeletons/` files listed under "Files to create/modify", (5) your `state.md` from the prior stage. Do **not** read other briefs, other stage files, or architecture files the brief doesn't cite.
+> **For stage N, your current brief (`stage-NN.md`) is the authoritative source for this stage.** If the brief references an architecture anchor or domain section, read it. If a prior brief or the architecture appears to contradict the current brief, **the current brief wins** — note the conflict in `state.md` under "Decisions taken that weren't in briefs" and proceed with the current brief. Your stage's context budget is: this brief + cited architecture refs + cited domain refs + `api-skeletons/` for files you'll touch + `state.md` from the prior stage. Reading more is not forbidden; it is simply not necessary and will dilute focus.
 
-### Per-stage brief schema (numbered, grep-verifiable)
+### Stage-kickoff template (required in `briefs/README.md`)
 
-Every brief file has exactly these 12 sections, in this order, with the heading text verbatim:
+At the start of every stage, Claude Code:
+1. Reads `state.md` (from prior stage).
+2. Runs pre-flight check: for every entry in `state.md` "Scaffolding still live", verify the scaffold slug is present in the codebase (`grep -r <slug> Sources/`). Mismatch → halt, escalate.
+3. Reads the current brief.
+4. Reads cited architecture + domain refs + relevant `api-skeletons/` files.
+5. Implements per the brief.
+6. Runs the per-stage verification gate.
+7. Updates `state.md` per §12 of the brief.
+8. Commits.
+
+### Per-stage brief schema (numbered, 12 sections, verbatim headings)
 
 ```
 # Stage NN — <title>
@@ -239,16 +306,23 @@ Every brief file has exactly these 12 sections, in this order, with the heading 
 ## 1. Frontmatter
 Type: FEATURE | MIGRATION
 Depends on: Stage X, Stage Y
-Retires scaffolding from: Stage Z (description)   # migration only
+Retires scaffolding from: Stage Z (scaffold slug)   # migration only
 
 ## 2. Starting state
 <what state.md should say entering this stage>
 
 ## 3. Goal
-<what changes this stage; for migration: "behavior preserved">
+
+<For FEATURE stages:>
+<one-sentence user-visible goal>
+
+<For MIGRATION stages:>
+- Adds: <primitive/type being added>
+- Removes: <scaffold slug being retired>
+- Behavior preserved: <list of behaviors that must remain unchanged>
 
 ## 4. Files to create / modify / delete
-- create: Sources/... (permanent | scaffolding)
+- create: Sources/... (permanent | scaffolding:<slug>)
 - modify: Sources/...
 - delete: ...
 
@@ -259,13 +333,14 @@ Retires scaffolding from: Stage Z (description)   # migration only
 - domain-revised/XX-<name>.md
 
 ## 7. Contracts & invariants
-- <invariant>  (ADR-## or G-##)
+- <invariant>  (ADR-## or G-## or D-##)
 
 ## 8. Tests to write
 - TESTABLE: <test>
 - FLAGGED: <test> — reason; retry in stage NN
-- DEFERRED: <test> — manual; record evidence in state.md
-- HITL: <test> — requires real device; device: iPhone 15 Pro
+- HITL: <test> — device: iPad Pro M1 (or iPad 11 A16)
+- DEFERRED: <test> — manual; record evidence
+- HITL+FLAGGED: <test> — compound classes allowed; must satisfy both class requirements
 
 ## 9. Tests preserved (must still pass)
 <prior-stage tests by name>   # migration only
@@ -280,54 +355,97 @@ Retires scaffolding from: Stage Z (description)   # migration only
 <concrete commands, Instruments templates, manual device checks>
 
 ## 12. State.md updates (Claude Code writes these)
-- <what to append/mark after this stage>
+- Retires: <scaffold slug>   # if any
+- Adds: <permanent entry>
+- Evidence: <HITL/DEFERRED result path if applicable>
 ```
 
-Mechanical check (Agent 4 + Agent 5 both run): every stage file contains all 12 numbered headings in order.
+### Testability classes (four + composites)
 
-### Testability classes (four, not three)
-
-- **TESTABLE** — unit or integration; runs in the stage; blocks the gate if failing.
-- **FLAGGED** — possible in principle but requires tooling the stage can't provide (e.g., Instruments). Must name the retry stage.
-- **HITL** — requires a real device (not simulator). Must specify `device:` field. Verified manually; evidence recorded in `state.md`.
-- **DEFERRED** — inherently manual, non-device (e.g., "output file has valid EXIF"). Evidence recorded in `state.md`.
+- **TESTABLE** — unit/integration; runs in stage; blocks gate on failure.
+- **FLAGGED** — possible but needs tooling the stage lacks (e.g., Instruments). Specifies retry stage.
+- **HITL** — requires a real device (not simulator). Specifies `device:`.
+- **DEFERRED** — inherently manual, non-device (e.g., "output file has valid EXIF"). Evidence recorded.
+- **Composite** — classes joined with `+` (e.g., `HITL+FLAGGED`). Test must satisfy both class requirements (both retry stage and device, etc.).
 
 ### Forbidden
-- No Swift code (that's what api-skeletons and Claude Code are for).
-- No re-deciding architecture (escalate if unclear).
+- No Swift code (api-skeletons + Claude Code do this).
+- No re-deciding architecture — escalate if unclear.
 - No bundling multiple stages into one brief.
 
 ### Quality bars
 
-**Mechanical (4)**
-- M1. Every brief file contains all 12 numbered section headings, in order.
-- M2. Every architecture ref anchor resolves (`architecture/*.md#<anchor>` exists).
-- M3. Every `Retires scaffolding from:` points at a stage that has the matching `scaffolding_introduced` in its YAML.
-- M4. Every test line matches one of the four classes; HITL lines have a `device:` field.
+**Mechanical (M1-M5) — scripted via `verify-briefs.sh`**
+- M1. Every brief file contains all 12 numbered section headings, in order, verbatim.
+- M2. Every architecture ref anchor resolves.
+- M3. Every `Retires scaffolding from: S (slug)` matches a `scaffolding_introduced: [S:slug]` entry in the stage-index.
+- M4. Every test line matches one of the four classes (or a composite); HITL/HITL+* lines have a `device:` field; FLAGGED/FLAGGED+* lines have a retry stage.
+- M5. Every `FLAGGED: <test> retry in stage NN` has a matching `TESTABLE: <same test>` in stage NN's brief.
 
-**Judgement (3)**
+**Judgement (J1-J3) — Agent 4 or human**
 - J1. Every brief's "Starting state" is derivable from prior briefs' "State.md updates" (chain consistency).
 - J2. Every migration stage's `Tests preserved:` names real prior-stage tests.
 - J3. Coverage: every `domain-revised/*` requirement is referenced by at least one brief by the final stage.
 
 ## The handoff document — `state.md`
 
-Lives in the implementation repo (the separate Swift project). Seeded from `state-template.md` at stage 1 start. Claude Code appends/updates at end of every stage. Committed per stage so it's diffable.
+Lives in the implementation repo (the separate Swift project). Seeded from `state-template.md` at stage 1. Claude Code appends/updates at end of every stage. Committed per stage.
 
-### Shape
-- **Current stage:** last completed + next
-- **What's built (permanent):** append-only
-- **Scaffolding still live:** added by feature stages, removed by migration stages
-- **Public API exposed so far:** cumulative
-- **Tests on file:** each with status `PASS | FAILING | FLAGGED | HITL | DEFERRED`
-- **Known quirks / deviations:** discovered during implementation
-- **Decisions taken that weren't in briefs:** escalation trail
-- **Open questions for next stage**
+### Simplified shape (per Feedback 3)
+
+State.md is **human-LLM communication only**. Swift test files are the authoritative source for test status; Claude Code does not mirror test names into state.md.
+
+```
+# state.md
+
+## Current stage
+Stage NN complete. Next: Stage NN+1.
+
+## Scaffolding still live
+- <stage-slug> — <one-line description>
+- ...
+
+## What's built (permanent)
+- <entry>   (append-only; removed only via explicit Retires)
+- ...
+
+## Public API exposed so far
+- <entry>
+
+## Manual test evidence
+- <test-name> — <device> — evidence/<path> — <date>
+
+## Decisions taken that weren't in briefs
+- <one-line decision> — <rationale> — ref: <architecture amendment filing if any>
+
+## Open questions for next stage
+- <question>
+```
 
 ### Rules
-- Append-only for "What's built" and "Tests on file"; entries mutate only via explicit `Retires:` or status transition.
-- Any decision not in the brief is logged.
+- Append-only for "What's built" and "Scaffolding still live"; entries mutate only via explicit `Retires:` in a brief's §12.
+- Any decision not in the brief is logged under "Decisions taken that weren't in briefs".
 - Committed after every stage.
+
+### Pre-flight check (minimal, per Feedback 2.4)
+
+At stage entry, the stage-kickoff template requires Claude Code to grep `Sources/` for every slug under "Scaffolding still live". Mismatch (scaffold entry in state.md but slug missing from code, or vice versa) → halt, escalate. Cheap, catches state.md drift before Swift is written.
+
+## Architecture amendment path (per Feedback 2.5)
+
+When Claude Code at some stage discovers the architecture is wrong (misread platform constraint, unforeseen framework behavior, wrong assumption about `AVCaptureSession` / Metal), the "Decisions taken that weren't in briefs" entry is not enough — the architecture itself drifts from reality.
+
+**Trigger**: any stage logging ≥2 unscripted decisions OR any decision touching `02-concurrency.md` or `03-camera-session.md` (load-bearing concerns).
+
+**Required action** before the next stage starts:
+1. Create a new `D-##` entry in `decisions.md` with `Source: stage-NN-field-finding`, full ADR-style (Context / Options / Consequences / Reversibility).
+2. Patch the owning concern file's inline rationale to match the new `D-##`.
+3. Update `constants.md` if a value changed.
+4. Re-run `verify-architecture.sh` (mechanical checks only — script passes in seconds).
+5. Human decides whether to rerun Agent 4 for the amended section (usually optional for minor amendments; required for Red-rank findings).
+6. If amendment changes future stages' contracts, Agent 5 reruns for the affected briefs only.
+
+Commit goes into the artifacts repo (`ios-translation/implementation/architecture/`), not the implementation repo. Diffable.
 
 ## Verification gate (Phase 2, per stage)
 
@@ -336,11 +454,10 @@ Enforced by Claude Code at the end of each stage in the implementation repo:
 1. `swift build` / Xcode build — must pass, no new warnings.
 2. `swift test` — all prior + new unit tests pass.
 3. Static checks if configured.
-4. Manual verification for FLAGGED / HITL / DEFERRED items — result recorded in `state.md` with evidence.
+4. Manual verification for FLAGGED / HITL / DEFERRED items — evidence recorded in `state.md`.
+5. Pre-flight check (next stage) runs at next stage entry, not as gate step here.
 
 ## Repo layout
-
-The iOS app is built in a **separate repository**. This repo holds only pipeline artifacts that the implementation project reads as external reference.
 
 ```
 ios-translation/                      (this repo)
@@ -351,6 +468,9 @@ ios-translation/                      (this repo)
 │   │   ├── agent-3-architect.md
 │   │   ├── agent-4-review.md
 │   │   └── agent-5-brief-writer.md
+│   ├── scripts/
+│   │   ├── verify-architecture.sh    (mechanical checks M1-M8)
+│   │   └── verify-briefs.sh          (mechanical checks M1-M5 for Agent 5 output)
 │   ├── architecture/                 (Agent 3 output)
 │   │   ├── README.md
 │   │   ├── 01-system-shape.md
@@ -364,9 +484,10 @@ ios-translation/                      (this repo)
 │   │   ├── 09-errors-and-recovery.md
 │   │   ├── api-surface.md
 │   │   ├── decisions.md
+│   │   ├── constants.md
 │   │   ├── open-questions.md
 │   │   └── api-skeletons/
-│   │       ├── Package.swift         # makes skeletons parseable via SwiftPM
+│   │       ├── Package.swift         (Swift 6 strict concurrency)
 │   │       ├── Sources/CameraKit/*.swift
 │   │       └── Sources/CameraCxx/*.{h,cpp}
 │   ├── stages/                       (Agent 3 output)
@@ -377,7 +498,7 @@ ios-translation/                      (this repo)
 │   │   ├── judgement.md
 │   │   └── findings.md
 │   └── briefs/                       (Agent 5 output)
-│       ├── README.md
+│       ├── README.md                 (source-of-truth + read-path + kickoff template)
 │       ├── stage-01.md … stage-N.md
 │       └── state-template.md
 └── CLAUDE.md                         (existing)
@@ -387,33 +508,38 @@ ios-translation/                      (this repo)
 ├── Sources/CameraKit/...
 ├── Sources/CameraApp/...
 ├── Tests/...
-└── state.md                          (Claude Code maintains here, diffable per stage)
+├── evidence/                         (HITL / DEFERRED artifacts: screenshots, traces, logs)
+└── state.md                          (Claude Code maintains per stage)
 ```
-
-Claude Code runs inside `<separate-repo>` and reads `ios-translation/implementation/` + `ios-translation/ios-platform-guide/` as external reference (absolute path or symlink).
 
 ## Known risks — mitigations and deferrals
 
 ### Addressed upfront
-1. **`02-concurrency.md` is load-bearing.** Mitigated by the concurrency contract table + bar J3.
-2. **Cross-input interaction surfacing.** Mitigated by required "Interactions considered" subsection + three canonical examples spanning different interaction shapes.
-3. **Stage count unknown at design time.** Mitigated by YAML frontmatter in `stage-index.md`; tooling uses `yq`.
-4. **Signature misreading by Claude Code.** Mitigated by `api-skeletons/` compilable stubs + bar M3 (`swift build` passes).
-5. **Context bloat per stage.** Mitigated by implementer read-path paragraph in `briefs/README.md`.
+1. **`02-concurrency.md` is load-bearing** — concurrency contract table + J3.
+2. **Cross-input interactions** — "Interactions considered" + 3 canonical examples + shape-tag mechanical check (M8).
+3. **Unknown stage count** — YAML frontmatter + chunking fallback for N > 12.
+4. **Signature misreading by Claude Code** — `api-skeletons/` + M3 Swift-strict-concurrency build.
+5. **Context bloat per stage** — source-of-truth framing in `briefs/README.md`.
+6. **Mechanical bars in LLM hands** — extracted to `verify-architecture.sh` / `verify-briefs.sh`.
+7. **Yellow-verdict oscillation** — 3-iteration human-review gate.
+8. **FLAGGED retry accountability** — M5 enforces matching TESTABLE in target stage.
+9. **state.md drift** — simplified state.md + pre-flight grep at stage entry.
+10. **Architecture drift from implementation reality** — amendment path with D-## + concern-file patch + mechanical re-verify.
+11. **Cross-subsystem ordering (no home)** — required subsection in `02-concurrency.md`.
+12. **Load-bearing constants (no home)** — `constants.md` register.
+13. **Double-homed decisions** — primary-owner rule in `architecture/README.md`.
 
 ### Deferred until first-run evidence
-6. **HITL test accountability.** Four-class labeling + `state.md` logs is the current containment. Dedicated registry with promotion tracking deferred.
-7. **state.md drift.** Chain consistency (Agent 5 J1) + prior tests passing is the current containment. Pre-flight reconciliation grep checks deferred.
-
-### Review posture
-After first end-to-end run (Agent 3 → 4 → 5 → Claude Code through stage 1), revisit risks 6 and 7.
+14. **Cadence heuristic numbers** — 2-consecutive-feature / 3-live-scaffold are starting heuristics, not hard rules. Revisit after first end-to-end run.
+15. **Full architecture re-review after minor amendments** — currently optional; may need to be mandatory if amendment-induced bugs appear.
 
 ## Success criteria
 
-1. Agent 3's output passes all M1-M5 and J1-J5 on first or second run.
-2. Agent 4 emits a Green verdict within ≤2 Agent-3 iterations.
-3. Agent 5's output passes all M1-M4 and J1-J3.
+1. `verify-architecture.sh` passes on first or second Agent-3 run.
+2. Agent 4 emits a Green verdict within ≤2 non-human iterations (no human-review gate hit).
+3. `verify-briefs.sh` passes on first or second Agent-5 run.
 4. `swift build` passes on `architecture/api-skeletons/` at Agent 3 completion.
 5. Claude Code implements stage 1 to a visible preview on simulator within one session.
-6. The full stage sequence completes with at most one human intervention per stage.
+6. Full stage sequence completes with at most one human intervention per stage.
 7. Every `domain-revised` requirement has at least one test in `briefs/` that verifies it.
+8. Paper-simulation rerun on a different requirement after spec lock still shows no material schema gaps.
