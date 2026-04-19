@@ -171,6 +171,15 @@ legacy consumer), the pass is still compute, not blit: RGBA16F → BGRA8 is a
 precision + channel-swizzle conversion. Only a same-format, same-precision copy
 qualifies as a blit, and that's not what's happening here.
 
+### See also
+
+- **G-32** — `MTLBlitCommandEncoder.copy(from:to:)` performs no format conversion;
+  both textures must share the same pixel format. Any `rgba16Float` → `bgra8Unorm`
+  transition requires a render or compute pass, not a blit. See `06-gotchas.md` G-32.
+- **G-33** — Label every `MTLCommandBuffer` (e.g., `commandBuffer.label = "frame.N.pass2"`)
+  and wrap each encoder in `pushDebugGroup(...)` / `popDebugGroup()` so Xcode GPU
+  Frame Captures are navigable. See `06-gotchas.md` G-33.
+
 ---
 
 ## ADR-16: AVAssetWriter for Metal recording
@@ -234,6 +243,21 @@ transition — see G-08.
 ---
 
 ## ADR-20: PixelSink texture storage mode is dynamic — flip to `.shared` on consumer attach
+
+### Start-simple default (v1)
+
+Allocate all IOSurface-eligible textures (`naturalTex`, `processedTex`) as
+`MTLStorageMode.shared` from the start. On Apple Silicon, unified memory means
+`.shared` vs `.private` does not involve a page-table copy — it only affects GPU
+private-cache residency. The bandwidth delta is negligible until many textures ×
+high frame rates × thermally-constrained conditions compound; we have no Instruments
+evidence of that cost on iPad Pro M1 or iPad 11 A16.
+
+Graduation criterion: switch to the dynamic rotation design below only if Instruments
+(Memory → IOSurface Bandwidth lane, or a sampled DRAM-bandwidth counter) shows
+measurable cost on a target device under production load. Do not pre-optimize.
+
+### Graduated design: dynamic rotation
 
 naturalTex and processedTex default to `.private` (GPU-only) when no PixelSink subscriber
 is attached. `.private` textures have a nil `.iosurface` property; any attempt to publish
