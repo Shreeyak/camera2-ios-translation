@@ -210,6 +210,41 @@ check_m6_retire_implies_depends() {
 
 check_m6_retire_implies_depends
 
-# M7-M8 added in subsequent tasks
+check_m7_constants_no_blanks() {
+    local constants="$ARCH/constants.md"
+    [[ -f "$constants" ]] || { fail "M7: constants.md missing"; return; }
+
+    local ok=1
+    # Each data row starts with '|'. Separator rows match only |---. Skip header + separator.
+    # A blank cell looks like '| |' or '|  |' (whitespace only).
+    local lineno=0
+    while IFS= read -r line; do
+        lineno=$((lineno+1))
+        # Skip non-table lines.
+        [[ "$line" =~ ^\| ]] || continue
+        # Skip the header-separator line ('| --- | --- | ...').
+        [[ "$line" =~ ^\|[[:space:]]*-+ ]] && continue
+        # Check each cell (strip leading/trailing |, split on |).
+        local trimmed="${line#|}"; trimmed="${trimmed%|}"
+        IFS='|' read -ra cells <<< "$trimmed"
+        # Header row: first line after '# Constants...'; skip by recognizing it
+        # contains "Name" literally.
+        if [[ "$line" == *"Name"* && "$line" == *"Value"* ]]; then continue; fi
+        for cell in "${cells[@]}"; do
+            # A cell is blank if it has only whitespace.
+            if [[ -z "${cell// /}" ]]; then
+                fail "M7: constants.md line $lineno has a blank cell"
+                ok=0
+                break
+            fi
+        done
+    done < "$constants"
+
+    (( ok == 1 )) && pass "M7: constants.md has no blank cells"
+}
+
+check_m7_constants_no_blanks
+
+# M8 added in subsequent tasks
 
 finish
