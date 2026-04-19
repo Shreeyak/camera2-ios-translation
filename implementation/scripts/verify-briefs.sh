@@ -153,4 +153,60 @@ check_m3_retire_real() {
 
 check_m3_retire_real
 
+check_m4_test_classes() {
+    local ok=1
+    local allowed='TESTABLE|FLAGGED|HITL|DEFERRED'
+
+    for brief in "$BRIEFS"/stage-*.md; do
+        [[ -f "$brief" ]] || continue
+        # Get the "## 8. Tests to write" block.
+        local block
+        block=$(awk '/^## 8\. Tests to write/{f=1; next} /^## /{f=0} f && /^-[[:space:]]+/' "$brief")
+        [[ -z "$block" ]] && continue
+        while IFS= read -r line; do
+            # Strip leading '- ' and trailing whitespace.
+            local body
+            body=$(echo "$line" | sed -E 's/^-[[:space:]]+//; s/[[:space:]]*$//')
+            # Empty bullet is fine.
+            [[ -z "$body" ]] && continue
+            # Allow "(none)" sentinel or parenthetical comment as non-test line.
+            [[ "$body" =~ ^\( ]] && continue
+
+            # Class is the colon-separated prefix. Accept composites joined with +.
+            local classes="${body%%:*}"
+            # Each class token must match one of allowed; accept '+'.
+            local class_ok=1
+            IFS='+' read -ra parts <<< "$classes"
+            for c in "${parts[@]}"; do
+                c="${c// /}"
+                if ! [[ "$c" =~ ^(${allowed})$ ]]; then
+                    fail "M4: $brief test line has unknown class '$c': $line"
+                    class_ok=0
+                    ok=0
+                    break
+                fi
+            done
+            (( class_ok == 0 )) && continue
+
+            # HITL (or HITL+*) must contain 'device:'
+            if [[ "$classes" == *HITL* ]]; then
+                if ! [[ "$body" =~ device: ]]; then
+                    fail "M4: $brief HITL test lacks 'device:' field: $line"
+                    ok=0
+                fi
+            fi
+            # FLAGGED (or FLAGGED+*) must contain 'retry in stage'
+            if [[ "$classes" == *FLAGGED* ]]; then
+                if ! [[ "$body" =~ retry[[:space:]]in[[:space:]]stage ]]; then
+                    fail "M4: $brief FLAGGED test lacks 'retry in stage NN': $line"
+                    ok=0
+                fi
+            fi
+        done <<< "$block"
+    done
+    (( ok == 1 )) && pass "M4: every test line has a valid class and required fields"
+}
+
+check_m4_test_classes
+
 finish
