@@ -111,6 +111,7 @@ check_m4_touches_valid() {
     # Each touches: value is a YAML list. yq returns them joined by newline per document.
     while IFS= read -r stem; do
         [[ -z "$stem" ]] && continue
+        [[ "$stem" == "---" ]] && continue  # yq multi-doc separator, not a value
         if ! [[ "$stem" =~ ^(${valid_re})$ ]]; then
             fail "M4: stage touches unknown concern file: $stem"
             ok=0
@@ -122,6 +123,52 @@ check_m4_touches_valid() {
 
 check_m4_touches_valid
 
-# M5-M8 added in subsequent tasks
+check_m5_scaffolding_pairs() {
+    local index="$STAGES/stage-index.md"
+    local yamls
+    yamls=$(awk '/^---$/{f=!f; if(f)print "---"; next} f' "$index")
+
+    # Collect all introduced and retired slugs across all stages.
+    local introduced retired
+    introduced=$(echo "$yamls" | yq eval-all '.scaffolding_introduced[]?' - | sort -u)
+    retired=$(echo "$yamls" | yq eval-all '.scaffolding_retired[]?' - | sort -u)
+
+    local ok=1
+    # Every introduced must appear in retired.
+    while IFS= read -r slug; do
+        [[ -z "$slug" ]] && continue
+        if ! grep -Fxq "$slug" <<< "$retired"; then
+            fail "M5: scaffold '$slug' introduced but never retired"
+            ok=0
+        fi
+    done <<< "$introduced"
+
+    # Every retired must reference an introduced slug.
+    while IFS= read -r slug; do
+        [[ -z "$slug" ]] && continue
+        if ! grep -Fxq "$slug" <<< "$introduced"; then
+            fail "M5: scaffold '$slug' retired but never introduced"
+            ok=0
+        fi
+    done <<< "$retired"
+
+    # No cycles in depends_on (simple DFS).
+    # Build adjacency from YAML.
+    local edges
+    edges=$(echo "$yamls" | yq eval-all '.stage as $s | .depends_on[]? | [$s, .] | @csv' - 2>/dev/null)
+    # Use tsort to detect cycles (it emits an error on cycles).
+    if [[ -n "$edges" ]]; then
+        if ! echo "$edges" | tr ',' ' ' | tsort >/dev/null 2>&1; then
+            fail "M5: depends_on graph has a cycle"
+            ok=0
+        fi
+    fi
+
+    (( ok == 1 )) && pass "M5: scaffolding pairs balanced and no depends_on cycles"
+}
+
+check_m5_scaffolding_pairs
+
+# M6-M8 added in subsequent tasks
 
 finish
