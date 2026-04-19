@@ -266,9 +266,9 @@ C++ consumers are optional; flip only on attach.
 ## VTFrameProcessor: do not use for custom color pipelines
 
 `VTFrameProcessor` (VideoToolbox, iOS 26+) exposes **system-defined effects only**:
-motion deblur, super-resolution, noise reduction, frame interpolation. It does not
-support arbitrary per-channel color-transform pipelines — the effect enumeration is
-fixed, not programmable.
+motion blur, super-resolution, noise reduction, frame interpolation, optical flow,
+and frame rate conversion. It does not support arbitrary per-channel color-transform
+pipelines — the effect enumeration is fixed, not programmable.
 
 Verdict (confirmed against WWDC25 Video Toolbox sessions): **custom Metal compute
 shaders are the correct approach for app-owned color pipelines.** VTFrameProcessor

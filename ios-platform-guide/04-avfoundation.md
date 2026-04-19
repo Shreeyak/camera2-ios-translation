@@ -61,8 +61,9 @@ Handling policy by reason:
 | `videoDeviceNotAvailableInBackground` | App backgrounded | No-op. Await `interruptionEnded`. |
 | `videoDeviceInUseByAnotherClient` | FaceTime, another camera app | Show **Resume** button. **Do not auto-resume** — user intent required. |
 | `audioDeviceInUseByAnotherClient` | Phone call, audio app | Show Resume button (same policy). |
-| `videoDeviceNotAvailableWithMultipleForegroundApps` | iPad Slide Over / Split View / PiP | Show "camera unavailable" label. Cannot be resolved programmatically — user must go full-screen. |
+| `videoDeviceNotAvailableWithMultipleForegroundApps` | iPad Slide Over / Split View / PiP | Show "camera unavailable" label. Cannot auto-resume — user must exit multitasking mode. |
 | `videoDeviceNotAvailableDueToSystemPressure` | Thermal throttling | Show "camera unavailable" label. Await `interruptionEnded`. |
+| `sensitiveContentMitigationActivated` | `SCVideoStreamAnalyzer` detected sensitive content (iOS 26+) | Show "camera unavailable" label. Resume requires calling `SCVideoStreamAnalyzer.continueStream()` — do **not** auto-resume. |
 
 On `interruptionEnded`:
 - Auto-resume (call `session.startRunning()` on `sessionQueue`) for
@@ -199,7 +200,7 @@ device.setExposureModeCustom(
 
 // Focus, WB, zoom are each independent commits inside the same lock window.
 device.setFocusModeLocked(lensPosition: 0.5, completionHandler: nil)
-device.setWhiteBalanceModeLockedWithDeviceWhiteBalanceGains(gains, completionHandler: nil)
+device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
 device.videoZoomFactor = 2.0
 ```
 
@@ -291,7 +292,7 @@ device.observe(\.systemPressureState) { device, _ in
         // stop recording if active; consider full session suspend
     case .shutdown:
         // session already being shut down by the system
-    @unknown default: break
+    default: break
     }
 }
 ```

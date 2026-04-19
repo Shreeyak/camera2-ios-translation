@@ -257,3 +257,156 @@ AVCaptureSession resumes
   (system via interruptionEnded, or manual via viewWillAppear)
   └─ first frame arrives; encode-and-commit resumes normally
 ```
+
+---
+
+## ADR-21: Approachable Concurrency — default MainActor isolation
+
+Enable Xcode 26's **Approachable Concurrency** build setting (compiler flag
+`-default-isolation MainActor`, SE-0466). With it on, every type in the module is
+implicitly `@MainActor` unless explicitly opted out. This *reduces* annotation
+noise and makes isolation intent legible at module scope — you no longer sprinkle
+`@MainActor` across every view model, observable, and SwiftUI view.
+
+### Concrete isolation topology for this app
+
+| Type | Isolation | How |
+|---|---|---|
+| `CameraView`, `ViewModel`, any `@Observable` state type | `@MainActor` | Implicit (default) |
+| `CameraEngine` | custom `actor` | Explicit `actor CameraEngine` — opts out of default |
+| `CaptureDelegate` (sample-buffer callback) | `nonisolated` | Explicit `final class … : NSObject, @unchecked Sendable` + `nonisolated` methods; runs on the `delivery` `DispatchQueue` |
+| Pure value types (`FrameSet`, `CaptureMetadata`, detection results) | `nonisolated` / `Sendable` | Value types with all `Sendable` fields |
+
+Compiler-verified isolation replaces comment discipline. If a type lacks isolation
+annotations, it is `@MainActor` — no ambiguity.
+
+### Interaction with existing ADRs
+
+- Does **not** relax ADR-07 (session queue). `AVCaptureSession` work still dispatches
+  onto the dedicated serial queue. Default isolation concerns Swift actor boundaries,
+  not `DispatchQueue` boundaries.
+- Does **not** relax ADR-02 (single heavy isolation domain). The engine remains a
+  custom actor; "default MainActor" only governs the UI side.
+- Does **not** retroactively change ADR-10 (Sendable). `CVPixelBuffer`, `cv::Mat`,
+  Metal objects remain non-Sendable and must stay inside the engine.
+
+### `nonisolated(nonsending)` (SE-0461)
+
+Nonisolated `async` functions no longer hop to the global concurrent executor by
+default — they run on the caller's actor. Implication: calling a `nonisolated async`
+helper from `@MainActor` code does **not** move work off main. To explicitly move
+to a background executor, mark the function `@concurrent`.
+
+```swift
+@concurrent
+nonisolated func compressJPEG(_ frame: sending CVPixelBuffer) async -> Data { ... }
+```
+
+This is the sharp edge: pre-Swift 6.2 code that relied on "nonisolated async ⇒
+background" now runs on main. Audit any long-running `async` helper when enabling
+Approachable Concurrency — add `@concurrent` where background execution was the
+intent.
+
+---
+
+## ADR-22: AsyncStream buffering is explicit
+
+Every `AsyncStream` in the pipeline declares its buffering policy at construction.
+The default (unbounded) policy is forbidden — it hides backpressure and lets slow
+consumers balloon memory until OOM.
+
+### Two policies for two stream shapes
+
+**Frame-rate streams — `.bufferingNewest(1)`.** Detection results, tracker signals,
+any stream keyed to the 30 Hz frame clock. Drop-oldest under backpressure. A slow
+consumer misses frames; it does not accumulate a backlog.
+
+```swift
+let (detections, cont) = AsyncStream.makeStream(
+    of: Detection.self,
+    bufferingPolicy: .bufferingNewest(1)
+)
+```
+
+**State-change streams — `.bufferingOldest(64)`.** Device state transitions
+(KVO adapter per ADR-14), session interruptions, configuration changes. These
+are sparse, every event matters, and the consumer must not miss the transition.
+Drop-newest under the (rare) overflow.
+
+```swift
+let (deviceState, cont) = AsyncStream.makeStream(
+    of: DeviceState.self,
+    bufferingPolicy: .bufferingOldest(64)
+)
+```
+
+### Rule
+
+Creating an `AsyncStream` without a buffering policy is a review-time failure. The
+`.unbounded` policy is forbidden outright. If you can't classify your stream as
+either frame-rate or state-change, you're designing the stream wrong.
+
+### Interaction with ADRs 13/19
+
+`.bufferingNewest(1)` is the Swift-level mailbox primitive. The C++ `PixelSink`
+mailbox (ADR-13) is the analogue on the C++ side, with its own overwrite counters.
+Both express the same invariant: **async consumers never block the frame path**.
+
+---
+
+## ADR-23: Task cancellation is enforced, not optional
+
+Every `Task` that loops over an `AsyncStream`, `AsyncSequence`, or any long-running
+work calls `try Task.checkCancellation()` per iteration. `Task.isCancelled` without
+a corresponding `throw` is explicitly non-conformant — it produces a `Task` that
+ignores cancellation.
+
+```swift
+// ✅ Correct
+for await frame in frameStream {
+    try Task.checkCancellation()
+    process(frame)
+}
+
+// ❌ Silent cancellation leak
+for await frame in frameStream {
+    guard !Task.isCancelled else { return }  // no-op in practice — the loop
+    process(frame)                           // never re-enters if upstream
+}                                            // hasn't closed the stream
+```
+
+`Task.isCancelled` without `throw` is permitted only when the cancellation
+semantics are checked *and* acted on before the next suspension point (rare —
+typically only for cleanup in a `withTaskCancellationHandler`).
+
+### Task ownership and cleanup
+
+Every engine-owned `Task` is stored in the engine actor and cancelled in
+`close()` / `deinit`. The pattern is non-optional — orphan tasks hold the actor
+alive, keep `CVPixelBuffer` pools drained, and fire completion handlers after
+teardown.
+
+```swift
+actor CameraEngine {
+    private var kvoTask: Task<Void, Never>?
+    private var metricsTask: Task<Void, Never>?
+
+    func open() async {
+        kvoTask = Task { [weak self] in
+            for await state in await self?.deviceStateStream() ?? .finished {
+                try? Task.checkCancellation()
+                await self?.apply(state)
+            }
+        }
+    }
+
+    func close() {
+        kvoTask?.cancel();     kvoTask = nil
+        metricsTask?.cancel(); metricsTask = nil
+        // ... stopRunning, release GPU resources, etc.
+    }
+}
+```
+
+Prefer `.task` over `onAppear { Task { … } }` in SwiftUI — `.task` auto-cancels on
+view disappear. See ADR-28 in `08-ios26-and-ui.md`.

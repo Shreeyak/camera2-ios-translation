@@ -20,11 +20,14 @@ minimal baseline, specific shader pipelines). Those are design-output concerns.
 | File | Contains |
 |---|---|
 | `01-architecture.md` | Two-file baseline; direct GPU outputs vs async consumers; per-frame command graph |
-| `02-concurrency.md` | Isolation topology, Sendable rules, Metal background submission, scenePhase semantics |
+| `02-concurrency.md` | Isolation topology, Sendable rules, Metal background submission, scenePhase, approachable concurrency, AsyncStream buffering, Task cancellation |
 | `03-metal.md` | Zero-copy via `CVMetalTextureCache`, working pixel format, GPU→encoder path, command-buffer error handling |
 | `04-avfoundation.md` | `AVCaptureSession` serial queue, KVO → `AsyncStream`, interruption reasons, orientation |
 | `05-interop.md` | Swift ↔ C++ direct interop, exception discipline, `SWIFT_SHARED_REFERENCE` |
 | `06-gotchas.md` | Quick-reference failure modes and API pitfalls |
+| `07-code-style.md` | Swift naming, golden-path, self-omission, trailing-closure rules; error type discipline |
+| `08-ios26-and-ui.md` | iOS 26 deployment target, no custom Liquid Glass, SwiftUI `.task` lifecycle rule |
+| `09-opencv.md` | OpenCV is the CV framework; Vision framework is not used; consumer integration pattern |
 
 ## ADR Index
 
@@ -53,6 +56,14 @@ cite these by ID (e.g. "per `ADR-06`" in `design/03-metal-pipeline.md`).
 | ADR-18 | Frame set publication: one atomic `FrameSet` carries natural + processed + tracker IOSurface refs, capture metadata, processing metadata, and tracker signals | 05 |
 | ADR-19 | Pool sizing (`N+1`), latest-wins mailboxes, per-lane drop counters | 05 |
 | ADR-20 | PixelSink texture storage mode is dynamic: `.private` by default, flips to `.shared` (IOSurface-backed) on consumer attach, rotates back on all-unsubscribe | 03 |
+| ADR-21 | Approachable Concurrency (SE-0466) — default MainActor isolation; engine remains an explicit `actor` | 02 |
+| ADR-22 | `AsyncStream` buffering is explicit: `.bufferingNewest(1)` for frame-rate streams, `.bufferingOldest(64)` for state streams; `.unbounded` forbidden | 02 |
+| ADR-23 | Task cancellation is enforced: `try Task.checkCancellation()` per iteration; engine-owned tasks stored + cancelled in `close()`/`deinit` | 02 |
+| ADR-24 | Swift style: naming, golden-path, self-omission, trailing-closure-single-arg-only, typed empty collections | 07 |
+| ADR-25 | Error type discipline: every public-API throwable uses a named module-scoped `enum: Error`; no untyped strings, no `NSError` | 07 |
+| ADR-26 | Deployment target iOS 26.0; no `@available` back-deploy scaffolding; no custom Liquid Glass | 08 |
+| ADR-28 | SwiftUI `.task` (not `onAppear` + manual `Task`) for async view-lifetime work; pairs with ADR-23 | 08 |
+| ADR-29 | OpenCV is the CV framework; Vision framework is not used | 09 |
 
 ## Gotchas Index (G-##)
 
@@ -66,3 +77,7 @@ design outputs.
 |---|---|
 | G-25 | `.private` texture has nil `.iosurface` → PixelSink fanout silently drops frames (ADR-20) |
 | G-26 | PixelSink consumer without per-stream drop counter → overwrite drops invisible under throttling (ADR-13, ADR-19) |
+| G-27 | `@unchecked Sendable` silences the diagnostic but not the data race (ADR-10) |
+| G-28 | `Task.isCancelled` without `throw` silently ignores cancellation (ADR-23, ADR-28) |
+| G-29 | `PhotosPicker` requires no `NSPhotoLibraryUsageDescription`; adding one unnecessarily = review friction (pairs with G-04, G-24) |
+| G-30 | Actor re-entrancy across `await` — state can change between suspension points; never assume equality across `await` (ADR-10) |

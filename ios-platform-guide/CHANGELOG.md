@@ -2,6 +2,120 @@
 
 Changes to `ios-platform-guide/`. Dates are when the change landed on `main`.
 
+## 2026-04-19 (OpenCV only; Vision removed)
+
+### Changed
+- **`09-vision-vs-opencv.md` replaced by `09-opencv.md`.** Vision framework is
+  not used in this app. OpenCV is the chosen CV framework. ADR-29 rewritten:
+  no equivalence table, no Vision-as-default framing, no "when to use Vision"
+  guidance. Agent 3 now has a single unambiguous directive: use OpenCV, do not
+  reach for Vision.
+- **`README.md`** — file table and ADR-29 row updated.
+
+---
+
+## 2026-04-19 (no custom Liquid Glass)
+
+### Removed
+- **ADR-27 removed from `08-ios26-and-ui.md`.** App does not use Liquid Glass.
+  System chrome adopts glass automatically on iOS 26 — no custom code required
+  or wanted. Keeping ADR-27 in the guide would signal to agent 3 that it should
+  apply `.glassEffect()`.
+
+### Changed
+- **`08-ios26-and-ui.md` — ADR-26 policy.** Added explicit rule: no
+  `.glassEffect()` modifier or `GlassEffectContainer` in this project.
+- **`README.md`** — ADR-27 row removed; ADR-26 and file table row updated.
+
+---
+
+## 2026-04-19 (verification pass)
+
+Verified every entry in `ios-platform-guide/` against Apple API Reference via
+Dash MCP. Two corrections in `04-avfoundation.md`:
+
+### Fixed
+
+- **`04-avfoundation.md` — wrong white-balance method name.** Code example used
+  the Objective-C name `setWhiteBalanceModeLockedWithDeviceWhiteBalanceGains`.
+  Corrected to Swift: `setWhiteBalanceModeLocked(with:completionHandler:)`.
+- **`04-avfoundation.md` — missing iOS 26 interruption reason.** Added
+  `sensitiveContentMitigationActivated` (new in iOS 26, from `SCVideoStreamAnalyzer`)
+  to the interruption reason table with the correct resume mechanism.
+- **`04-avfoundation.md` — `videoDeviceNotAvailableWithMultipleForegroundApps` note.**
+  Removed mention of `isMultitaskingCameraAccessEnabled` — not a feature this app
+  implements; keeping it out of the guide prevents agent 3 from wiring it up.
+
+---
+
+## 2026-04-19
+
+Track A from the `read-descriptions-for-the-radiant-eich` plan. Enriched the guide
+with content mined from Claude Code skills (`modern-swift`, `swift-concurrency`,
+`swift-style`, `ios-26-platform`, `photokit`, `vision-framework`) so a downstream
+implementation agent inherits the knowledge via the stable ADR/G-## citation
+layer instead of via ad-hoc skill invocations.
+
+### Added
+
+- **`02-concurrency.md` — ADR-21 Approachable Concurrency.** Enable Xcode 26
+  `-default-isolation MainActor` (SE-0466). Default isolation topology table:
+  view/view-model/`@Observable` → implicit `@MainActor`; `CameraEngine` →
+  explicit `actor`; `CaptureDelegate` → `nonisolated`. Calls out the
+  `nonisolated(nonsending)` (SE-0461) change: `nonisolated async` no longer
+  hops to the concurrent executor — use `@concurrent` to opt in explicitly.
+  Does not relax ADR-02, ADR-07, or ADR-10.
+- **`02-concurrency.md` — ADR-22 AsyncStream buffering is explicit.** Every
+  stream declares policy at construction. Frame-rate streams →
+  `.bufferingNewest(1)` (drop-oldest); state-change streams →
+  `.bufferingOldest(64)`. `.unbounded` forbidden. Mirrors the C++ PixelSink
+  mailbox discipline (ADR-13).
+- **`02-concurrency.md` — ADR-23 Task cancellation is enforced, not
+  optional.** `try Task.checkCancellation()` per loop iteration;
+  `Task.isCancelled` without `throw` is non-conformant. Every engine-owned
+  `Task` is stored and cancelled in `close()`/`deinit`. Pairs with ADR-28.
+- **`07-code-style.md` (new file) — ADR-24 Swift style rules.** Naming,
+  golden-path (`guard`-first, no nested `if`), `self` omission, trailing
+  closures for single-argument calls only, typed empty collections.
+- **`07-code-style.md` — ADR-25 Error type discipline.** Every public-API
+  throwable throws a named module-scoped `enum: Error`. `NSError`,
+  string-typed errors banned. `throws(SomeError)` (Swift 6 typed throws)
+  at module boundaries.
+- **`08-ios26-and-ui.md` (new file) — ADR-26 iOS 26.0 deployment target, no
+  back-deploy scaffolding.** No `@available(iOS …)`, no `@backDeployed`.
+  Declaratively removes the scaffolding tax agents generate by default.
+- **`08-ios26-and-ui.md` — ADR-27 Liquid Glass scope: chrome only.** Camera
+  preview `MTKView` stays opaque; `.glassEffect()` on toolbars/buttons/sheets
+  only. Anti-pattern example shows glass over live content (forces
+  composition through glass pass every frame).
+- **`08-ios26-and-ui.md` — ADR-28 SwiftUI `.task` (not `onAppear` + manual
+  `Task`).** `.task` auto-cancels on view disappear; pair with ADR-23 so the
+  inner loop actually responds to the cancellation signal.
+- **`09-vision-vs-opencv.md` (new file) — ADR-29 OpenCV chosen deliberately
+  to exercise the Swift↔C++ integration path.** Documents Vision as the
+  iOS-native default for future CV consumers. Equivalence table
+  (`DetectContoursRequest` vs `cv::Canny`, `RecognizeTextRequest` vs
+  Tesseract, etc.). Lists the valid reasons to add another C++ consumer
+  instead of reaching for Vision.
+- **G-27** — `@unchecked Sendable` silences the diagnostic, not the race.
+- **G-28** — `Task.isCancelled` without `throw` silently ignores cancellation.
+- **G-29** — `PhotosPicker` requires no `NSPhotoLibraryUsageDescription`;
+  unnecessary inclusion = App Store review friction.
+- **G-30** — Actor re-entrancy across `await`: state may change between
+  suspension points; never assume equality across `await`.
+
+### Index
+- `README.md` File table gained rows for `07-code-style.md`,
+  `08-ios26-and-ui.md`, `09-vision-vs-opencv.md`; `02-concurrency.md` row
+  updated to list approachable concurrency, AsyncStream buffering, and
+  Task cancellation.
+- `README.md` ADR index gained rows for ADR-21 through ADR-29.
+- `README.md` Gotchas index gained rows for G-27 through G-30.
+- Root `CLAUDE.md` ID-range reference updated from `ADR-01 … ADR-20` to
+  `ADR-01 … ADR-29` and `G-01 … G-26` to `G-01 … G-30`.
+
+---
+
 ## 2026-04-18
 
 ### Added

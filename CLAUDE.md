@@ -24,7 +24,7 @@ between stages, not by a compiler.
 | 4 REVIEW | `prompt-4-review.md` | `domain-revised/` + `ios-platform-guide/` + `design/` only | `review/` (3 files, Green/Yellow/Red verdict) |
 
 `ios-platform-guide/` is a human-authored input to Agent 3 (not produced by any agent). It
-contains platform-level ADRs (ADR-01 … ADR-20) and gotchas (G-01 … G-26). Update it by hand
+contains platform-level ADRs (ADR-01 … ADR-29) and gotchas (G-01 … G-30). Update it by hand
 when iOS conventions change; design outputs cite ADRs by ID and deviate only via a `D-##`
 decision that names the ADR.
 
