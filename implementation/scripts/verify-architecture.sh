@@ -157,8 +157,9 @@ check_m5_scaffolding_pairs() {
     local edges
     edges=$(echo "$yamls" | yq eval-all '.stage as $s | .depends_on[]? | [$s, .] | @csv' - 2>/dev/null)
     # Use tsort to detect cycles (it emits an error on cycles).
+    # Filter out '---' multi-doc separators yq emits between documents.
     if [[ -n "$edges" ]]; then
-        if ! echo "$edges" | tr ',' ' ' | tsort >/dev/null 2>&1; then
+        if ! echo "$edges" | grep -v '^---$' | tr ',' ' ' | tsort >/dev/null 2>&1; then
             fail "M5: depends_on graph has a cycle"
             ok=0
         fi
@@ -169,6 +170,46 @@ check_m5_scaffolding_pairs() {
 
 check_m5_scaffolding_pairs
 
-# M6-M8 added in subsequent tasks
+check_m6_retire_implies_depends() {
+    local index="$STAGES/stage-index.md"
+    local yamls
+    yamls=$(awk '/^---$/{f=!f; if(f)print "---"; next} f' "$index")
+
+    # Extract three parallel streams, filtering yq multi-doc '---' separators.
+    # paste(1) zips them back into "stage|depends_joined|retired_joined" rows.
+    local stages depends_col retired_col
+    stages=$(echo "$yamls"    | yq eval-all '.stage'                           - | grep -v '^---$')
+    depends_col=$(echo "$yamls" | yq eval-all '.depends_on // [] | join(",")' - | grep -v '^---$')
+    retired_col=$(echo "$yamls" | yq eval-all '.scaffolding_retired // [] | join(",")' - | grep -v '^---$')
+
+    local ok=1
+    # For every stage, each retired slug's source stage (S) must appear in depends_on.
+    # Slug format: "S:slug". Extract S and verify.
+    while IFS='|' read -r stage depends retired; do
+        IFS=',' read -ra retired_arr <<< "$retired"
+        IFS=',' read -ra depends_arr <<< "$depends"
+        for slug in "${retired_arr[@]}"; do
+            [[ -z "$slug" ]] && continue
+            local src="${slug%%:*}"
+            # Strip leading zeros for comparison ('01' vs '1')
+            local src_n=$((10#$src))
+            local found=0
+            for d in "${depends_arr[@]}"; do
+                [[ -z "$d" ]] && continue
+                if (( 10#$d == src_n )); then found=1; break; fi
+            done
+            if (( found == 0 )); then
+                fail "M6: stage $stage retires '$slug' but depends_on does not include $src"
+                ok=0
+            fi
+        done
+    done < <(paste -d'|' <(echo "$stages") <(echo "$depends_col") <(echo "$retired_col"))
+
+    (( ok == 1 )) && pass "M6: every retired scaffold's source stage is in depends_on"
+}
+
+check_m6_retire_implies_depends
+
+# M7-M8 added in subsequent tasks
 
 finish
