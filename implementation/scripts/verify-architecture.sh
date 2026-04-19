@@ -51,6 +51,31 @@ check_m1_files_exist() {
 
 check_m1_files_exist
 
-# M2-M8 added in subsequent tasks
+check_m2_d_anchors() {
+    # For every D-## row in decisions.md (col 1), find that D-## as a heading or anchor
+    # in some architecture/*.md file. Failure = D-## exists in register but no inline.
+    local decisions="$ARCH/decisions.md"
+    [[ -f "$decisions" ]] || { fail "M2: decisions.md missing"; return; }
+
+    # Extract D-## IDs from the table column 1 (skip header/sep rows).
+    local ids
+    ids=$(grep -oE '^\| D-[0-9]+' "$decisions" | awk '{print $2}' | sort -u || true)
+    [[ -z "$ids" ]] && { pass "M2: no D-## entries to check"; return; }
+
+    local ok=1
+    while IFS= read -r id; do
+        # Search for this D-## as either a heading (## D-##) or plain mention
+        # in any architecture/*.md file other than decisions.md.
+        if ! grep -rlE "^## ${id}( |$)" "$ARCH" --include='*.md' --exclude='decisions.md' >/dev/null; then
+            fail "M2: ${id} in decisions.md has no inline '## ${id}' anchor in a concern file"
+            ok=0
+        fi
+    done <<< "$ids"
+    (( ok == 1 )) && pass "M2: every D-## in decisions.md has an inline anchor"
+}
+
+check_m2_d_anchors
+
+# M3-M8 added in subsequent tasks
 
 finish
