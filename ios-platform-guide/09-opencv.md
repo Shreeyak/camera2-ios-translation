@@ -27,7 +27,10 @@ The edge-detection consumer is the reference shape:
 
 1. Subscribe to the tracker stream (~480p — fits the Canny budget of 2–4ms on
    A16; see G-23).
-2. `IOSurfaceLock` the buffer, run `cv::Canny`, `IOSurfaceUnlock`.
+2. `IOSurfaceLock` the buffer, construct a zero-copy `cv::Mat` view using
+   `IOSurfaceGetBytesPerRow(surface)` as the stride argument (`width * bpp` is wrong
+   under hardware alignment padding — see `06-gotchas.md` G-34), run `cv::Canny`,
+   `IOSurfaceUnlock`.
 3. Write the composited result into the pre-allocated shared `MTLTexture`.
 4. Fire the C-ABI write-complete callback; Swift schedules a Metal blit pass
    (`generateMipmaps(for:)`).
@@ -50,3 +53,4 @@ ADR-19) applies to every C++ consumer identically.
 - Consumer contract (drop-on-busy, mailbox, observability): ADR-13, ADR-19.
 - IOSurface-backed texture storage: ADR-20, G-25.
 - Tracker stream sizing and CV budget: G-23.
+- `cv::Mat` over IOSurface — stride must be `IOSurfaceGetBytesPerRow`, not `width * bpp`: G-34, `06-gotchas.md`.

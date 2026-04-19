@@ -284,3 +284,51 @@ Extensions that need a **domain trigger** before being taken:
   domain-driven passes and the command-buffer orchestration no longer fits in the
   engine.
 - Objective-C++ layer: never. See ADR-11.
+
+---
+
+## ADR-32: `CaptureDeviceProviding` dependency-injection seam for testability
+
+The engine's state machine, error classifier, recovery backoff, settings merge, and
+EXIF JSON schema are all pure-logic components that should be unit-testable without a
+physical camera. To achieve this, `CameraEngine` must not depend on the concrete
+`AVCaptureDevice`; it depends on a protocol (`CaptureDeviceProviding`) whose real
+implementation wraps `AVCaptureDevice` and whose fake implementation supplies canned
+format enumerations, focus modes, and capability bits for unit tests.
+
+```swift
+// Protocol exposes only the surface the engine actually touches.
+protocol CaptureDeviceProviding: AnyObject {
+    var uniqueID: String { get }
+    var activeFormat: CaptureFormat { get set }
+    var formats: [CaptureFormat] { get }
+    var isFocusModeSupported: (FocusMode) -> Bool { get }
+
+    func lockForConfiguration() throws
+    func unlockForConfiguration()
+    func setFocusMode(_ mode: FocusMode)
+    func setExposureMode(_ mode: ExposureMode)
+    // ...grown organically from engine's actual call sites
+}
+
+// Engine depends on the protocol.
+actor CameraEngine {
+    private let device: any CaptureDeviceProviding
+    init(device: any CaptureDeviceProviding) { self.device = device }
+}
+
+// Unit tests supply a fake.
+final class FakeCaptureDevice: CaptureDeviceProviding { /* canned */ }
+```
+
+### Discipline
+
+- **Protocol grows organically.** Only methods the engine actually calls appear in it.
+  No speculative surface.
+- **Real implementation is a thin adapter.** It owns the real `AVCaptureDevice`
+  instance and forwards calls; no logic lives in the adapter.
+- **v1 requirement, not a v2 aspiration.** Phase 1a's first unit tests must already
+  use the fake; the seam is not retrofitted later.
+
+Cross-references: ADR-01 (two-file baseline), ADR-02 (isolation domain), ADR-33
+(testing strategy — defined in `07-code-style.md`).

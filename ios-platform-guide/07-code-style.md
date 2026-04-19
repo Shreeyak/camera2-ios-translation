@@ -161,6 +161,38 @@ present. The view does not catch `Error` — it reads the typed state.
 
 ---
 
+---
+
+## ADR-33: Testing strategy: Swift Testing for unit, XCTest for integration, `CaptureDeviceProviding` as the seam
+
+**Unit tests (Swift Testing):** all pure-logic components — state machine, error
+classifier, recovery backoff, settings merge, EXIF JSON schema, color-format
+channel-order validation — are tested with Swift Testing (`@Test` / `#expect`). No
+real AVFoundation. No real Metal device. The fake `CaptureDeviceProviding` (ADR-32)
+is the seam; tests never construct `AVCaptureDevice`.
+
+**Integration tests (XCTest):** any test that needs a real Metal device, a real
+AVFoundation pipeline, or the real OpenCV consumer runs under XCTest on the simulator
+or on a device lab. Golden-frame tests (render a known input through the real Metal
+pipeline, compare output against a checked-in reference with a tolerance threshold)
+are XCTest. Tests that boot the real `AVCaptureSession` and verify a session
+transition observed in state are XCTest.
+
+**Golden-frame corpus:** reference images are checked in under `Tests/GoldenFrames/`.
+Each test loads an input tile + expected output tile; comparison uses per-pixel Lab ΔE
+tolerance (ΔE < 2 typical). Failures write the actual output and a diff visualization
+alongside the reference for inspection.
+
+**Acceptance rule:** every deliverable from Phase 1a onward ships with unit tests at
+the `CaptureDeviceProviding` seam. If a component under test requires AVFoundation or
+Metal to exercise its logic, it needs refactoring against ADR-32, not a pass on unit
+testing.
+
+Cross-references: ADR-24 (Swift style), ADR-25 (error type discipline), ADR-32
+(`CaptureDeviceProviding`).
+
+---
+
 ## Style rules *not* in this document
 
 - File layout per-module (where `CameraEngine.swift` lives, what's in
