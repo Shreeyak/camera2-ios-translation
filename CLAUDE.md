@@ -34,9 +34,9 @@ The Agent 3/4/5 pipeline and its two verify scripts are designed per
 orients at the subdirectory level.
 
 `ios-platform-guide/` is a human-authored input to Agent 3 (not produced by any agent). It
-contains platform-level ADRs (ADR-01 … ADR-29) and gotchas (G-01 … G-30). Update it by hand
-when iOS conventions change; design outputs cite ADRs by ID and deviate only via a `D-##`
-decision that names the ADR.
+contains platform-level ADRs and gotchas. Update it by hand when iOS conventions change;
+architecture outputs cite ADRs by ID and deviate only via a `D-##` decision that names the
+ADR.
 
 ## The load-bearing architectural rule: clean room separation
 
@@ -69,7 +69,7 @@ grep -rn -E 'iOS|Swift|Metal|AVCapture|CVPixelBuffer|UIKit|SwiftUI' audit/
 grep -rn -E 'Camera2|CameraCaptureSession|CaptureRequest|HandlerThread|SurfaceTexture|AHardwareBuffer|ImageReader|MediaRecorder|EGLContext' domain/
 grep -rn -E 'because Camera2|Android equivalent|iOS equivalent|Kotlin|the Android version' domain/
 
-# Before Agent 3 (DESIGN): verify domain-revised/ is clean (same checks, different dir).
+# Before Agent 3 (ARCHITECT): verify domain-revised/ is clean (same checks, different dir).
 grep -rn -E 'Camera2|CameraCaptureSession|CaptureRequest|HandlerThread|SurfaceTexture|AHardwareBuffer|ImageReader|MediaRecorder|EGLContext' domain-revised/
 grep -rn -E 'because Camera2|Android equivalent|iOS equivalent|Kotlin|the Android version' domain-revised/
 
@@ -83,7 +83,9 @@ grep -E 'Verdict: (Green|Yellow|Red)' implementation/review/README.md
 ./implementation/scripts/verify-briefs.sh implementation/
 ```
 
-There is no build, no linter, and no test runner. The grep commands above *are* the test suite.
+For Agents 1/2 the grep commands are the test suite. For Agents 3/4/5 the two verify
+scripts are the test suite (run against fixtures in `implementation/scripts/fixtures/`
+and against real pipeline output).
 
 ## Context-sensitive language rule for `domain/` and `domain-revised/`
 
@@ -93,33 +95,12 @@ image buffer") but must not use them as Android type references ("the `ImageRead
 reviewing either directory, judge by whether the word names an Android API surface, not by
 raw grep hits on the word alone.
 
-## iOS platform baseline (from `ios-platform-guide/`, not the Android source)
+## iOS platform baseline
 
-The iOS platform conventions Agent 3 builds on live in `ios-platform-guide/`, not in the
-Agent 3 prompt and not derivable from `audit/`. Headline choices:
-
-- iOS 26+, Swift 6 strict concurrency, Metal 3 baseline (Metal 4 features `#available`-gated),
-  SwiftUI + `MTKView` via `UIViewRepresentable`.
-- Two-file architecture baseline: `CameraView.swift` (SwiftUI + inline `UIViewRepresentable`
-  + ViewModel) and `CameraEngine.swift` (one actor owning `AVCaptureSession`, Metal,
-  consumers). See `ios-platform-guide/01-architecture.md` ADR-01/02.
-- Direct GPU outputs (preview, encoder via IOSurface pool, still readback) vs async consumers
-  (C++ CV pipelines with drop-on-busy dispatch). Preview is inviolable — sync consumer
-  dispatch is forbidden. ADR-03, ADR-13.
-- Zero-copy Metal via `CVMetalTextureCache` (ADR-04), working format `rgba16Float` for color
-  pipelines (ADR-05), GPU→encoder via IOSurface-backed `CVPixelBufferPool` + `MTLBlitCommandEncoder`
-  (ADR-06, ADR-16).
-- Swift ↔ C++ direct interop with `.interoperabilityMode(.Cxx)`; OpenCV headers stay private
-  to `.cpp` files; no Objective-C++ anywhere (ADR-11, ADR-12).
-- scenePhase `.background` stops the session; `.inactive` gates GPU submission (Metal
-  background rule; ADR-08, ADR-09).
-- `CVPixelBuffer` and `cv::Mat` are not `Sendable`; buffer handling stays on one queue and
-  only plain `Sendable` result structs cross actor boundaries (ADR-10).
-- OpenCV is a **new capability** (Android doesn't use it) validated via an edge-detection
-  consumer proof-of-concept.
-
-Update `ios-platform-guide/` by hand when platform conventions change. Do not try to
-"extract" these from the Android source — they're iOS-native.
+The iOS platform conventions Agent 3 builds on live in `ios-platform-guide/`, not in this
+file. See `ios-platform-guide/README.md` for the ADR and gotcha index. Update the guide by
+hand when platform conventions change; do not try to "extract" these from the Android
+source — they're iOS-native.
 
 ## Reviewer discipline
 
@@ -131,8 +112,7 @@ hand-editing the output.
 ## Commit discipline
 
 Agents produce files but **never run git operations**. All commits require explicit user
-approval. Recent history shows one commit per agent prompt (semantic, ordered
-docs → features → chore) so that each stage can be reverted independently.
+approval.
 
 ## Background reading (only when needed)
 

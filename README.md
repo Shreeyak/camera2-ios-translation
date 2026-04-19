@@ -63,11 +63,6 @@ Open a fresh Claude Code session in this directory, then paste each prompt file 
 | 5 | **BRIEF WRITER** | Reviewed architecture + stages | `implementation/briefs/` | Per-stage implementation briefs (12-section schema, FLAGGED/HITL/DEFERRED testability classes) |
 | 5.5 | **MECHANICAL (scripted)** | Agent 5 output | (stdout) | `verify-briefs.sh` runs M1–M5 (section headings, anchor resolution, retire-matches-introduced, test class fields, FLAGGED retry chain) |
 
-Agents 3/4/5 live under `implementation/prompts/`; scripts live under `implementation/scripts/`.
-The full design rationale for the new pipeline is in
-`docs/superpowers/specs/2026-04-19-implementation-pipeline-design.md`, and the plan that
-built it is in `docs/superpowers/plans/2026-04-19-implementation-pipeline.md`.
-
 ---
 
 ## Directory Structure
@@ -115,7 +110,7 @@ ios-translation/
 - **Clean room separation**: Agent 3 reads platform-neutral `domain-revised/` + `ios-platform-guide/` only. It does not read `audit/`. Gaps in `domain-revised/` are patched upstream, not routed around.
 - **Different organizational structures enforce separation**: `audit/` is organized by Android component; `domain-revised/` is organized by behavioral concern. The different shape prevents `domain-revised/` from being read as "translated Android docs."
 - **Language discipline**: `domain-revised/` contains zero Android API names. Enforced by Agent 2's mandatory `grep` self-audit phase, with a context-sensitive rule for common English words (`Handler`, `Surface`, `Image`, `Message`) that double as Android class names.
-- **iOS expertise is injected, not extracted**: Metal, Swift 6 actors, `Sendable`, VTFrameProcessor, OpenCV iOS — these come from `ios-platform-guide/` as human-authored ADRs, not from anything the Android audit could produce.
+- **iOS expertise is injected, not extracted**: Metal, Swift 6 actors, `Sendable`, AVFoundation capture, OpenCV on iOS — these come from `ios-platform-guide/` as human-authored ADRs, not from anything the Android audit could produce.
 - **Mechanical + judgement split**: `verify-architecture.sh` and `verify-briefs.sh` enforce every rule that can be grep'd, yq'd, or compiled. Agent 4 only judges the things machines can't (soundness, plausibility, coverage).
 - **Compiling Swift skeleton**: Agent 3 emits a SwiftPM package of type stubs (`fatalError("Stage N")` bodies). `swift build` runs in CI; signatures can't silently drift between the prose architecture and the downstream implementation.
 - **Scaffolding pairs**: Each stage can introduce a temporary crutch as long as a later stage explicitly retires it. The verify scripts enforce pairing — no orphan scaffolds.
