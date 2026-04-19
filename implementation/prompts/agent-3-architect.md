@@ -146,8 +146,6 @@ For the requirement "scenePhase `.inactive` gates Metal submission; `.background
 - **api-skeletons**: `CameraEngine.handleScenePhase(_:)`, `CameraEngine.backgroundSuspend()`, `RecordingCoordinator.drainForBackgrounding(timeout:)`.
 - **Stages**: a MIGRATION stage in the middle of the journey that retires Stage-02's crude `.inactive → stopRunning` scaffold and installs the proper gate. `touches: [02-concurrency, 04-metal-pipeline, 08-ui]`. `depends_on: [02]`. `scaffolding_retired: [02:crude-inactive-stop]`.
 
-A full trace lives in `docs/paper-simulation-scenephase-drain.md`. Read it before Phase A to understand what your output has to carry.
-
 ## How to finish
 
 When Phase A is complete, announce "ARCHITECTURE FROZEN". Then produce `stages/stage-index.md`. When both are complete, stop. Do not produce briefs, review files, or test code — those belong to Agents 4 and 5.

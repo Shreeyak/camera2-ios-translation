@@ -158,7 +158,6 @@ After each agent, run these checks before proceeding:
 - **`docs/superpowers/specs/2026-04-19-implementation-pipeline-design.md`** — Formal spec for the Agent 3/4/5 pipeline (architecture outputs, stage index schema, M-bar / J-bar discipline).
 - **`docs/superpowers/plans/2026-04-19-implementation-pipeline.md`** — Implementation plan used to build the Agent 3/4/5 prompts and the two verify scripts.
 - **`implementation/README.md`** — Subdirectory orientation for Agent 3/4/5 artifacts.
-- **`docs/paper-simulation-scenephase-drain.md`** — Full schema-walkthrough paper simulation that stress-tested the Agent 3 output schema before building the prompt.
 
 ---
 
