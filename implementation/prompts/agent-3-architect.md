@@ -108,10 +108,10 @@ Columns: `domain file | primary concern(s) | implementing stage(s)`. One row per
 
 - No Swift code in prose concern files (signatures may appear only in `api-surface.md` in a signature block; full stubs live in `api-skeletons/`).
 - No numeric values inline in concern files — cite `constants.md#<name>` instead.
-- No silent deviations from `ios-platform-guide` ADRs. Every deviation gets a `D-##`: full ADR-style if consequential (Context / Options / Consequences / Reversibility), one-line if minor.
+- No silent deviations from `ios-platform-guide` ADRs. Every deviation gets a `D-##`: full ADR-style if consequential (Context / Options / Consequences / Reversibility), one-line if minor. A deviation is **consequential** if it satisfies any of: (a) it alters a contract that crosses ≥2 concern files (e.g., changing where `AVCaptureSession` is owned changes `02-concurrency.md`, `03-camera-session.md`, and `06-capture-and-recording.md`); (b) it introduces a runtime dependency not present in the ADR (e.g., adding `swift-atomics` when the ADR describes `OSAllocatedUnfairLock`); (c) it is irreversible without a dedicated MIGRATION stage. A deviation is **minor** if it affects only a single concern file and can be reverted by editing that file alone.
 - Scaffolding ID convention: `<stage-number>:<kebab-case-slug>` (e.g., `02:crude-inactive-stop`). The slug must also appear as a comment in the scaffold code once written.
 - Cadence heuristic (soft): prefer no more than 2 consecutive FEATURE stages before a MIGRATION, or no stage entering with more than 3 live scaffolds. Violate only with a one-line justification in the stage's prose body.
-- Walking skeleton: Stage 01 must produce something user-visible (e.g., bare camera preview on screen with empty bottom bar).
+- Walking skeleton: Stage 01 must produce something user-visible — meaning observable by a person running the app: screen output, an audible signal, or a filesystem artifact the user can open. (e.g., bare camera preview on screen with empty bottom bar).
 
 ## Quality bars your output must pass
 

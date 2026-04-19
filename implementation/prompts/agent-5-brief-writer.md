@@ -41,7 +41,11 @@ Depends on: Stage X, Stage Y
 Retires scaffolding from: Stage Z (scaffold slug)   # migration only
 
 ## 2. Starting state
-<what state.md should say entering this stage>
+<Reproduce the relevant subset of state.md entering this stage. Use the exact section headings from state-template.md: "Scaffolding still live", "What's built (permanent)", "Public API exposed so far". Omit sections that carry "(none)". For stage 01, all sections are "(none)". Example for a mid-pipeline stage:>
+
+Scaffolding still live: 02:crude-inactive-stop, 03:stub-metal-pass
+What's built (permanent): CameraEngine actor (open/close/stream), AVCaptureSession wired to delivery queue
+Public API exposed so far: CameraEngine.open(), CameraEngine.close(), AsyncStream<DetectionResult>
 
 ## 3. Goal
 <For FEATURE: one-sentence user-visible goal>
@@ -125,7 +129,12 @@ At the start of every stage, Claude Code:
 
 ## Glossary
 
-(brief terms local to this project: scaffold slug, migration stage, HITL, DEFERRED, etc.)
+- **scaffold slug** — a short kebab-case identifier (e.g., `02:crude-inactive-stop`) naming a temporary implementation crutch introduced in stage NN and removed in a later MIGRATION stage. Format is `NN:slug`. The slug appears as a code comment wherever the scaffold lives in source.
+- **migration stage** — a stage of `type: MIGRATION` in stage-index.md. Its purpose is to replace ≥1 scaffold with a production primitive. It does not add user-visible features; it preserves all prior behavior while retiring scaffolding.
+- **TESTABLE** — a test that can be written and run automatically in this stage with the current build target and simulator.
+- **FLAGGED** — a test whose automation prerequisites (type, API, or device) do not exist yet; must be retried in a specified future stage (syntax: `FLAGGED: <test> — retry in stage NN`).
+- **HITL** — Human-In-The-Loop: a test requiring a physical device or manual observation. Must carry `device: <model>`.
+- **DEFERRED** — a test that cannot be automated and will not become automatable within the stage corpus; evidence recorded manually.
 ```
 
 ## `briefs/state-template.md`
@@ -165,6 +174,6 @@ Mechanical (checked by `implementation/scripts/verify-briefs.sh`):
 - **M5** — every `FLAGGED: <test> retry in stage NN` has a matching `TESTABLE: <same test>` in `stage-NN.md`.
 
 Judgement (spot-checked by you or a human before handoff):
-- **J1** — every brief's §2 "Starting state" is derivable from prior briefs' §12 "State.md updates" (walk the chain).
+- **J1** — every brief's §2 "Starting state" is derivable from prior briefs' §12 "State.md updates" (walk the chain). Self-check before finishing: for each stage N > 1, apply §12 of stage N-1 to the state carried in from stage N-2, and confirm the result matches §2 of stage N exactly. Concretely: (a) start from stage 01's §2 (all "(none)"); (b) apply stage 01's §12 "Retires" / "Adds" mutations; (c) confirm the result equals stage 02's §2; (d) repeat through the final stage. If any §2 cannot be derived from the prior §12, correct either §2 or §12 before declaring done.
 - **J2** — every migration stage's §9 "Tests preserved" names real prior-stage tests (test names must be ones you actually specified in prior briefs).
 - **J3** — by the final stage, every `domain-revised/*.md` requirement is referenced in at least one brief.
