@@ -209,4 +209,41 @@ check_m4_test_classes() {
 
 check_m4_test_classes
 
+check_m5_flagged_retry_chain() {
+    local ok=1
+    # Collect all FLAGGED entries: (origin_brief, test_name, retry_stage)
+    for brief in "$BRIEFS"/stage-*.md; do
+        [[ -f "$brief" ]] || continue
+        local block
+        block=$(awk '/^## 8\. Tests to write/{f=1; next} /^## /{f=0} f && /^-[[:space:]]+/' "$brief")
+        while IFS= read -r line; do
+            [[ "$line" =~ ^-[[:space:]]+FLAGGED([+]|:) ]] || continue
+            local body="${line#*- }"
+            # Extract test name (between class: and '—' or 'retry')
+            local test_name
+            test_name=$(echo "$body" | sed -E 's/^[A-Z+]+:[[:space:]]*//; s/[[:space:]]*—.*$//')
+            # Extract retry stage number.
+            local retry
+            retry=$(echo "$body" | sed -nE 's/.*retry[[:space:]]+in[[:space:]]+stage[[:space:]]+([0-9]+).*/\1/p')
+            [[ -z "$retry" ]] && continue
+            local retry_padded
+            retry_padded=$(printf '%02d' "$retry")
+            local target_brief="$BRIEFS/stage-${retry_padded}.md"
+            if [[ ! -f "$target_brief" ]]; then
+                fail "M5: $brief FLAGGED '$test_name' targets missing brief: $target_brief"
+                ok=0
+                continue
+            fi
+            # Target brief must have a TESTABLE entry naming the same test.
+            if ! grep -qE "^-[[:space:]]+TESTABLE([+]|:)[^\n]*${test_name}" "$target_brief"; then
+                fail "M5: $brief FLAGGED '$test_name' has no matching TESTABLE in $target_brief"
+                ok=0
+            fi
+        done <<< "$block"
+    done
+    (( ok == 1 )) && pass "M5: every FLAGGED retry has a matching TESTABLE in the target stage"
+}
+
+check_m5_flagged_retry_chain
+
 finish
