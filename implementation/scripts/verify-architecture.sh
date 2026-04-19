@@ -245,6 +245,31 @@ check_m7_constants_no_blanks() {
 
 check_m7_constants_no_blanks
 
-# M8 added in subsequent tasks
+check_m8_interaction_shapes() {
+    local readme="$ARCH/README.md"
+    local allowed_tags='concurrency×lifecycle|storage×consumer|error×recovery|resource×teardown|settings×session|ui×state'
+
+    # Extract the ## Interactions considered section.
+    local section
+    section=$(awk '/^## Interactions considered/{f=1; next} /^## /{f=0} f' "$readme")
+    [[ -z "$section" ]] && { fail "M8: 'Interactions considered' section missing"; return; }
+
+    local ok=1
+    # Each bullet must carry a tag matching allowed_tags.
+    while IFS= read -r line; do
+        [[ "$line" =~ ^- ]] || continue
+        # Allow bullets literally containing a known tag OR the phrase "no interaction"
+        # (nulls allowed per spec).
+        if [[ "$line" =~ no\ interaction\ found ]]; then continue; fi
+        if ! echo "$line" | grep -qE "${allowed_tags}"; then
+            fail "M8: interaction bullet lacks shape tag: $line"
+            ok=0
+        fi
+    done <<< "$section"
+
+    (( ok == 1 )) && pass "M8: every interaction bullet carries a shape tag"
+}
+
+check_m8_interaction_shapes
 
 finish
