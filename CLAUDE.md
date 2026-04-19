@@ -4,14 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-This is **not** an iOS codebase. It is a prompt-engineering workspace containing a 4-agent
-"clean room" pipeline that translates a Flutter + Android camera library
+This is **not** an iOS codebase. It is a prompt-engineering workspace containing a
+multi-agent "clean room" pipeline that translates a Flutter + Android camera library
 (`/Users/shrek/work/cambrian/camera2_flutter_demo`) into a native iOS 26 / Swift 6 / Metal 4
 design. The artifacts here are markdown prompts and markdown outputs — there is no Swift,
 no Xcode project, and no build/lint/test loop.
 
-The "code" is the four prompt files, and correctness is enforced by grep-based verification
-between stages, not by a compiler.
+The "code" is the agent prompts plus two verify scripts (`implementation/scripts/`); correctness
+is enforced by grep-based and swift-build-based verification between stages, not by a compiler
+watching the whole tree.
 
 ## Pipeline (run in order)
 
@@ -37,19 +38,16 @@ contains platform-level ADRs (ADR-01 … ADR-29) and gotchas (G-01 … G-30). Up
 when iOS conventions change; design outputs cite ADRs by ID and deviate only via a `D-##`
 decision that names the ADR.
 
-`orchestrator-prompt.md` is an experimental all-in-one driver. `*.archived` files are the
-old 2-prompt pipeline kept for reference — do not edit or re-activate them.
-
 ## The load-bearing architectural rule: clean room separation
 
-Agent 3 (DESIGN) reads the platform-neutral `domain-revised/` as its primary input so Android
-structure cannot leak into the iOS design. `domain-revised/` is a manually reviewed and
-corrected version of `domain/` (Agent 2's output). Two invariants enforce clean room separation:
+Agent 3 (ARCHITECT) reads the platform-neutral `domain-revised/` as its primary input so
+Android structure cannot leak into the iOS architecture. `domain-revised/` is a manually
+reviewed and corrected version of `domain/` (Agent 2's output). The invariant:
 
-1. **`domain-revised/` contains zero Android API names.** Verify before running Agent 3.
-2. **`audit/` is an escape hatch only.** Every lookup Agent 3 makes into `audit/` is logged
-   in `design/08-audit-lookups.md`. More than ~10 entries is a yellow flag that `domain-revised/`
-   has a gap — the fix is to patch `domain-revised/`, never to route around it.
+- **`domain-revised/` contains zero Android API names.** Verify before running Agent 3.
+- **Agent 3 reads only `domain-revised/` + `ios-platform-guide/`.** It does not read `audit/`;
+  gaps in `domain-revised/` must be patched upstream, not routed around by reaching into
+  Android-structured facts.
 
 `audit/` is organized by Android component; `domain-revised/` is organized by behavioral concern.
 The deliberately different shapes are what stop `domain-revised/` from being read as "translated
@@ -125,9 +123,10 @@ Update `ios-platform-guide/` by hand when platform conventions change. Do not tr
 
 ## Reviewer discipline
 
-Agent 4 never reads `audit/`. If the reviewer finds a gap, the remedy is always "fix
-`domain-revised/`" or "fix `design/`", never a localized patch. Re-run the upstream agent
-with the findings attached instead of hand-editing the output.
+Agent 4 (ARCHITECTURE REVIEW) never reads `audit/`. If the reviewer finds a gap, the
+remedy is always "fix `domain-revised/`" or "rerun Agent 3 with findings attached", never
+a localized patch to `implementation/architecture/`. Re-run the upstream agent instead of
+hand-editing the output.
 
 ## Commit discipline
 
@@ -138,8 +137,6 @@ docs → features → chore) so that each stage can be reverted independently.
 ## Background reading (only when needed)
 
 - `README.md` — operator-facing overview, always current.
-- `clean-room-convo.md` — design conversation with every branch point and rationale. Read
-  first if you need to understand *why* the pipeline is shaped this way.
 - `docs/superpowers/specs/2026-04-12-clean-room-prompt-redesign-design.md` — formal spec
   for Agents 1-2 (language rules, classification discipline, escape hatch rules).
 - `docs/superpowers/plans/2026-04-12-clean-room-prompt-redesign.md` — implementation plan

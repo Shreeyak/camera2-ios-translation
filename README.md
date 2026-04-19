@@ -1,6 +1,6 @@
 # iOS Translation — Clean Room Pipeline
 
-A 4-agent pipeline for translating the Flutter/Android camera library to a native iOS/Swift app using a clean room approach: platform-neutral domain knowledge is the primary input to iOS design, preventing Android structure from leaking into the design.
+A multi-agent pipeline for translating the Flutter/Android camera library to a native iOS/Swift app using a clean room approach: platform-neutral domain knowledge is the primary input to iOS architecture, preventing Android structure from leaking into the design.
 
 **Source**: `/Users/shrek/work/cambrian/camera2_flutter_demo` (Flutter + Android)
 **Target**: iOS 26+, Swift 6, Metal 4, SwiftUI + UIKit
@@ -38,22 +38,15 @@ cd /Users/shrek/work/cambrian/ios-translation
 
 ## How to Run
 
-Two options:
-
-### Option A — Manual (one agent at a time)
-
 Open a fresh Claude Code session in this directory, then paste each prompt file in order, reviewing the output between agents:
 
-1. Paste `prompt-1-audit.md` → verify `audit/` populated (13 files)
+1. Paste `prompt-1-audit.md` → verify `audit/` populated
 2. Paste `prompt-2-extract.md` → verify `domain/` populated, grep for Android API leakage
-3. Review `domain/` yourself (language discipline, classifications)
-4. Paste `prompt-3-design.md` → verify `design/` populated, check `design/08-audit-lookups.md`
-5. Paste `prompt-4-review.md` → read `review/README.md` for Green/Yellow/Red verdict
-6. Begin implementation using Phase 1a from `design/05-implementation-phases.md`
-
-### Option B — Orchestrator (automated with checkpoints)
-
-Use the orchestrator prompt (drafted in this conversation — not yet saved to a file) to dispatch all 4 agents as sonnet subagents with automated verification between phases. The orchestrator pauses for user approval between agents and halts on language-discipline failures. See `clean-room-convo.md` for the design.
+3. Review `domain/` yourself (language discipline, classifications); commit the reviewed version as `domain-revised/`
+4. Paste `implementation/prompts/agent-3-architect.md` → verify `implementation/architecture/` + `implementation/stages/` populated, run `./implementation/scripts/verify-architecture.sh implementation/`
+5. Paste `implementation/prompts/agent-4-review.md` → read `implementation/review/README.md` for Green/Yellow/Red verdict
+6. Paste `implementation/prompts/agent-5-brief-writer.md` → verify `implementation/briefs/` populated, run `./implementation/scripts/verify-briefs.sh implementation/`
+7. Hand `implementation/briefs/` + `implementation/architecture/` + `ios-platform-guide/` to Claude Code in a separate Swift repo for the per-stage implementation
 
 ---
 
@@ -82,59 +75,53 @@ built it is in `docs/superpowers/plans/2026-04-19-implementation-pipeline.md`.
 ```
 ios-translation/
 ├── README.md                              # This file
-├── clean-room-convo.md                    # Design conversation summary (decisions + rationale)
+├── CLAUDE.md                              # Operator rules for agents running in this repo
 ├── setup.sh                               # Pre-step: repomix pack + reference doc copy
 │
 ├── prompt-1-audit.md                      # Agent 1 (run first)
 ├── prompt-2-extract.md                    # Agent 2 (run second)
-├── prompt-3-design.md                     # Agent 3 (run third)
-├── prompt-4-review.md                     # Agent 4 (run fourth)
 │
-├── prompt-1-cartographer.md.archived      # Previous 2-prompt pipeline (kept for reference)
-├── prompt-2-architect.md.archived         # Previous 2-prompt pipeline (kept for reference)
+├── ios-platform-guide/                    # Human-authored ADRs + gotchas (input to Agent 3)
+│
+├── implementation/                        # Agent 3/4/5 pipeline (prompts + verify scripts + outputs)
+│   ├── prompts/                           # agent-3-architect, agent-4-review, agent-5-brief-writer
+│   ├── scripts/                           # verify-architecture.sh + verify-briefs.sh + fixtures
+│   ├── architecture/                      # Agent 3 output — iOS architecture + compiling SwiftPM skeleton
+│   ├── stages/                            # Agent 3 output — stage-index.md
+│   ├── review/                            # Agent 4 output — Green/Yellow/Red verdict
+│   └── briefs/                            # Agent 5 output — per-stage implementation briefs
 │
 ├── docs/superpowers/
-│   ├── specs/2026-04-12-clean-room-prompt-redesign-design.md   # Design rationale
-│   └── plans/2026-04-12-clean-room-prompt-redesign.md          # Implementation plan
+│   ├── specs/2026-04-12-clean-room-prompt-redesign-design.md   # Spec for Agents 1-2
+│   ├── plans/2026-04-12-clean-room-prompt-redesign.md          # Plan for Agents 1-2
+│   ├── specs/2026-04-19-implementation-pipeline-design.md      # Spec for Agent 3/4/5
+│   └── plans/2026-04-19-implementation-pipeline.md             # Plan for Agent 3/4/5
 │
 ├── packed/                                # Repomix output (generated by setup.sh)
 ├── screenshots/                           # UI screenshots (user provides)
 ├── reference/                             # Android docs copied by setup.sh
 │
-├── audit/                                 # Agent 1 output — Android-structured facts (empty until run)
-├── domain/                                # Agent 2 output — platform-neutral requirements (empty until run)
-├── design/                                # Agent 3 output — iOS architecture + phased plan (empty until run)
-└── review/                                # Agent 4 output — findings report (empty until run)
+├── audit/                                 # Agent 1 output — Android-structured facts
+├── domain/                                # Agent 2 output — platform-neutral requirements
+├── domain-revised/                        # Human-reviewed domain/ — authoritative input to Agent 3
+│
+└── tmp/cleanup/                           # Superseded artifacts from earlier pipeline iterations
 ```
 
 ---
 
 ## Key Architecture Decisions
 
-- **Clean room separation**: Agent 3 reads platform-neutral `domain/` as primary input. `audit/` is an escape hatch for specific lookups only, and every lookup is logged in `design/08-audit-lookups.md`.
-- **Different organizational structures enforce separation**: `audit/` is organized by Android component; `domain/` is organized by behavioral concern. The different shape prevents `domain/` from being read as "translated Android docs."
-- **Language discipline**: `domain/` contains zero Android API names. Enforced by Agent 2's mandatory `grep` self-audit phase, with a context-sensitive rule for common English words (`Handler`, `Surface`, `Image`, `Message`) that double as Android class names.
-- **iOS expertise is injected, not extracted**: Metal 4, Swift 6 actors, `Sendable`, VTFrameProcessor, OpenCV iOS — these come from Agent 3's reference architecture section, not from anything the Android audit could produce.
-- **OpenCV is a new capability**: Android has a generic C++ consumer registration pattern but doesn't use OpenCV. iOS design adds an OpenCV edge detection consumer as proof-of-concept to validate the full integration path.
+- **Clean room separation**: Agent 3 reads platform-neutral `domain-revised/` + `ios-platform-guide/` only. It does not read `audit/`. Gaps in `domain-revised/` are patched upstream, not routed around.
+- **Different organizational structures enforce separation**: `audit/` is organized by Android component; `domain-revised/` is organized by behavioral concern. The different shape prevents `domain-revised/` from being read as "translated Android docs."
+- **Language discipline**: `domain-revised/` contains zero Android API names. Enforced by Agent 2's mandatory `grep` self-audit phase, with a context-sensitive rule for common English words (`Handler`, `Surface`, `Image`, `Message`) that double as Android class names.
+- **iOS expertise is injected, not extracted**: Metal, Swift 6 actors, `Sendable`, VTFrameProcessor, OpenCV iOS — these come from `ios-platform-guide/` as human-authored ADRs, not from anything the Android audit could produce.
+- **Mechanical + judgement split**: `verify-architecture.sh` and `verify-briefs.sh` enforce every rule that can be grep'd, yq'd, or compiled. Agent 4 only judges the things machines can't (soundness, plausibility, coverage).
+- **Compiling Swift skeleton**: Agent 3 emits a SwiftPM package of type stubs (`fatalError("Stage N")` bodies). `swift build` runs in CI; signatures can't silently drift between the prose architecture and the downstream implementation.
+- **Scaffolding pairs**: Each stage can introduce a temporary crutch as long as a later stage explicitly retires it. The verify scripts enforce pairing — no orphan scaffolds.
 - **Sendable strategy**: `CVPixelBuffer` and `cv::Mat` are not Sendable. All buffer handling stays on one queue; only plain Sendable result structs cross actor boundaries.
-- **Two-pass review**: Correctness (every requirement met?) + Adversarial (what fails in production?). The reviewer never reads `audit/` — if gaps exist, the answer is "fix `domain/`" or "fix `design/`", never patch.
+- **Agent 4 never patches; it rereruns upstream**: if the reviewer finds a gap, the remedy is always "fix `domain-revised/`" or "rerun Agent 3 with findings attached", never a localized patch.
 - **Never commits automatically**: All agents produce files but require user approval before any git operation.
-
----
-
-## iOS Implementation Phases (produced by Agent 3)
-
-```
-Phase 1a  Camera capture + state machine + lifecycle + permissions
-Phase 1b  Camera controls (focus, AWB, AE, ISO, exposure, zoom)
-Phase 2   Metal processing pipeline (replace raw preview with MTKView)
-Phase 3   C++ integration + OpenCV edge detection consumer + fan-out topology
-Phase 4   Performance tuning + thermal/pressure resilience
-Phase 5   Capture + recording (AVAssetWriter, EXIF)
-Phase 6   Parity audit + polish
-```
-
-Each phase produces a testable milestone with a concrete file tree.
 
 ---
 
@@ -147,28 +134,18 @@ After each agent, run these checks before proceeding:
 | 1 (AUDIT) | No iOS terminology in audit/ | `grep -rn -E 'iOS\|Swift\|Metal\|AVCapture\|CVPixelBuffer\|UIKit\|SwiftUI' audit/` (expect 0 hits outside of forbidden-list context) |
 | 2 (EXTRACT) | No Android API names in domain/ | `grep -rn -E 'Camera2\|CameraCaptureSession\|CaptureRequest\|HandlerThread\|SurfaceTexture\|AHardwareBuffer\|ImageReader\|MediaRecorder\|EGLContext' domain/` (expect 0 hits) |
 | 2 (EXTRACT) | No forbidden reasoning | `grep -rn -E 'because Camera2\|Android equivalent\|iOS equivalent\|Kotlin\|the Android version' domain/` (expect 0 hits) |
-| 3 (DESIGN) | Audit lookups logged | `cat design/08-audit-lookups.md` (>10 entries is a yellow flag) |
-| 3 (DESIGN) | OpenCV edge detection designed | `grep -l 'cv::Canny\|EdgeDetection' design/04-opencv-integration.md` |
-| 4 (REVIEW) | Verdict extracted | `head -20 review/README.md` (look for Green/Yellow/Red) |
-
----
-
-## Expected File Counts
-
-| Directory | Files | Contents |
-|-----------|-------|----------|
-| `audit/` | 13 | `README.md` + `01-system-topology.md` through `12-git-archaeology.md` (includes `04-pigeon-api.md` added during implementation) |
-| `domain/` | 13 | `README.md` + `01-system-purpose.md` through `12-unresolved.md` |
-| `design/` | 9 | `README.md` + `01-architecture.md` through `08-audit-lookups.md` |
-| `review/` | 3 | `README.md` + `01-correctness-check.md` + `02-adversarial-red-team.md` |
+| 3 (ARCHITECT) | Mechanical checks M1–M8 | `./implementation/scripts/verify-architecture.sh implementation/` (expect `[OK] All checks passed.`) |
+| 4 (ARCHITECTURE REVIEW) | Verdict extracted | `grep -E 'Verdict: (Green\|Yellow\|Red)' implementation/review/README.md` |
+| 5 (BRIEF WRITER) | Mechanical checks M1–M5 | `./implementation/scripts/verify-briefs.sh implementation/` (expect `[OK] All checks passed.`) |
 
 ---
 
 ## If Agent 4 Returns Yellow or Red
 
-- **Green**: ship it — proceed to implementation
-- **Yellow**: read the findings, decide whether to accept risks, re-run Agent 3 with findings as additional input, or patch design files manually
-- **Red**: re-run upstream agent (Agent 2 if `domain/` has gaps, Agent 3 if design is missing iOS requirements) with findings attached. Do not proceed to implementation as-is.
+- **Green**: proceed to Agent 5 (brief writer); after briefs pass, hand off to the downstream Swift repo for implementation.
+- **Yellow**: read the findings in `implementation/review/findings.md`; rerun Agent 3 with the findings attached. Agent 5 remains blocked.
+- **Red**: rerun Agent 3 fully with the findings attached. Agent 5 remains blocked.
+- **3 consecutive Yellows**: Agent 4 halts and recommends human override, narrower mechanical check, or spec-level schema change (see `implementation/prompts/agent-4-review.md`).
 
 **Never auto-rerun.** The reviewer produces findings only; the user decides next action.
 
@@ -176,7 +153,6 @@ After each agent, run these checks before proceeding:
 
 ## Background Reading
 
-- **`clean-room-convo.md`** — Summary of the design conversation with every major branch and decision point. Read this first if you want to understand WHY the pipeline is structured this way.
 - **`docs/superpowers/specs/2026-04-12-clean-room-prompt-redesign-design.md`** — Formal spec for Agents 1-2 with language rules, classification discipline, and escape hatch rules.
 - **`docs/superpowers/plans/2026-04-12-clean-room-prompt-redesign.md`** — Implementation plan used to build the first 4 prompts.
 - **`docs/superpowers/specs/2026-04-19-implementation-pipeline-design.md`** — Formal spec for the Agent 3/4/5 pipeline (architecture outputs, stage index schema, M-bar / J-bar discipline).
@@ -186,28 +162,12 @@ After each agent, run these checks before proceeding:
 
 ---
 
-## Git History
-
-```
-chore(ios-translation): archive 2-prompt pipeline and update README
-feat(ios-translation): add Agent 4 (REVIEW) prompt for clean room pipeline
-feat(ios-translation): add Agent 3 (DESIGN) prompt for clean room pipeline
-feat(ios-translation): add Agent 2 (EXTRACT) prompt for clean room pipeline
-feat(ios-translation): add Agent 1 (AUDIT) prompt for clean room pipeline
-docs(ios-translation): add clean room prompt redesign spec and plan
-```
-
-Semantic commits ordered docs → features → chore. Each agent prompt is isolated in its own commit for easy revert.
-
----
-
 ## Status
 
-✅ Pipeline implemented and committed
-✅ All 4 prompts written, reviewed, and consistency-checked
-✅ Old 2-prompt pipeline archived for reference
-⏳ Pipeline not yet run — `audit/`, `domain/`, `design/`, `review/` are empty
-⏳ `setup.sh` needs to be run
-⏳ `screenshots/` needs user-provided images
+✅ Pipeline implemented and committed (Agents 1-5 + two verify scripts)
+✅ `ios-platform-guide/` authored and reviewed
+✅ `domain-revised/` reviewed and committed
+⏳ Agent 3/4/5 not yet run end-to-end — `implementation/architecture/`, `stages/`, `review/`, `briefs/` are empty
+⏳ Downstream Swift repo not yet started
 
-**Next action**: Run `./setup.sh`, add screenshots, then start the pipeline.
+**Next action**: Run Agent 3 against `domain-revised/` + `ios-platform-guide/`, then the verify scripts, then Agents 4 and 5.
