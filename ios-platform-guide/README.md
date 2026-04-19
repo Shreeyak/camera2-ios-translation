@@ -64,6 +64,10 @@ cite these by ID (e.g. "per `ADR-06`" in `design/03-metal-pipeline.md`).
 | ADR-26 | Deployment target iOS 26.0; no `@available` back-deploy scaffolding; no custom Liquid Glass | 08 |
 | ADR-28 | SwiftUI `.task` (not `onAppear` + manual `Task`) for async view-lifetime work; pairs with ADR-23 | 08 |
 | ADR-29 | OpenCV is the CV framework; Vision framework is not used | 09 |
+| ADR-30 | AVCaptureSession lifecycle via async with timeout; never sessionQueue.sync from MainActor | 04 |
+| ADR-31 | Swift-subclassing C++ abstract class is unproven; spike first, C-ABI callback struct as fallback | 05 |
+| ADR-32 | CaptureDeviceProviding dependency-injection seam for testability | 01 |
+| ADR-33 | Testing strategy: Swift Testing for unit, XCTest for integration; CaptureDeviceProviding as seam | 07 |
 
 ## Gotchas Index (G-##)
 
@@ -81,3 +85,7 @@ design outputs.
 | G-28 | `Task.isCancelled` without `throw` silently ignores cancellation (ADR-23, ADR-28) |
 | G-29 | `PhotosPicker` requires no `NSPhotoLibraryUsageDescription`; adding one unnecessarily = review friction (pairs with G-04, G-24) |
 | G-30 | Actor re-entrancy across `await` — state can change between suspension points; never assume equality across `await` (ADR-10) |
+| G-31 | Raw `Task { @MainActor }` on hot-path delegates is fragile (ADR-22) |
+| G-32 | `MTLBlitCommandEncoder.copy` does not format-convert; RGBA16F → BGRA8 must be render/compute (ADR-05, ADR-06) |
+| G-33 | Label `MTLCommandBuffer`s and `pushDebugGroup`/`popDebugGroup` for Xcode GPU capture navigability |
+| G-34 | `IOSurfaceGetBytesPerRow` may exceed `width * bpp`; `cv::Mat` view requires stride argument (ADR-29) |
