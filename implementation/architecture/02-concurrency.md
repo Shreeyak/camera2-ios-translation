@@ -35,15 +35,16 @@ least one row below. Primitives may enforce multiple invariants.
 |---|---|---|
 | `actor CameraEngine` (ADR-02) | Inv 1 (camera-state serialization), Inv 9 (recovery retries cancelled on close / suspend), Inv 12 (watchdog callbacks observe only originating session — via captured session-token identity) | Concurrent state mutation; dangling retry; stale watchdog touches released resources |
 | Dedicated `sessionQueue` (ADR-07) via async-with-timeout (ADR-30) | Inv 1 (state mutation ≠ UI context; all `lockForConfiguration` calls serialized), Inv 6 (per-frame uniform write path serialized with session-queue-driven config) | `NSGenericException` on `lockForConfiguration` from main; purple warning; blocking `startRunning` on `@MainActor` (G-03) |
-| Dedicated `delivery` queue + `nonisolated` `CaptureDelegate` (ADR-07, ADR-02) | Inv 2 (GPU operations on single dedicated serial context), Inv 10 (consumer dispatch never blocks frame path), Inv 11 (stall timestamp written on delivery, read elsewhere via atomic — see row below) | Lost capture-order ordering (ADR-02 anti-pattern); per-frame `Task` allocation drains `CVPixelBuffer` pool; preview hitches |
-| `ManagedAtomic<Bool>` submission gate (ADR-09) | Inv 8 (fast-path capture-requested flag is lock-free; same primitive family), Inv 11 (stall timestamp visibility via `ManagedAtomic<UInt64>` siblings) | `MTLCommandBufferErrorNotPermitted` IOAF 6 on background submit → process termination |
+| Dedicated `delivery` queue + `nonisolated` `CaptureDelegate` (ADR-07, ADR-02) | Inv 2 (GPU operations on single dedicated serial context), Inv 10 (consumer dispatch never blocks frame path) | Lost capture-order ordering (ADR-02 anti-pattern); per-frame `Task` allocation drains `CVPixelBuffer` pool; preview hitches |
+| `ManagedAtomic<Bool>` submission gate (ADR-09) | scenePhase gate: `gpuSubmissionEnabled` gates `commit()` after scenePhase→`.inactive` (ADR-09 + D-06 strict policy) | `MTLCommandBufferErrorNotPermitted` IOAF 6 on background submit → process termination |
+| `ManagedAtomic<UInt64>` stall-timestamp (ADR-09) | Inv 11 (stall timestamp cross-context visibility: write side on `delivery` queue, read side in watchdog actor context) | Torn / stale timestamp read → false-positive or missed stall detection |
 | `.bufferingNewest(1)` mailbox (ADR-22) + `.bufferingOldest(STATE_STREAM_BUFFER_SIZE)` for state streams | Inv 3 (UI callbacks on main — consumer side uses `for await` on `@MainActor`), Inv 10 (drop-on-busy mailbox semantics) | Unbounded memory growth; backpressure pushes back into camera producer; missed state transitions |
 | C-ABI `std::atomic<bool>` (capture-requested) and `std::atomic<uint64_t>` (mailbox overwrite count) in C++ `PixelSink` (ADR-13) | Inv 7 (capture in-flight guard via atomic CAS), Inv 8 (lock-free fast-path on every frame), Inv 10 (atomic publish of frame ref into 1-slot mailbox) | Two concurrent captures; frame path acquires a lock; mailbox race drops frames without counter |
 | `std::mutex` native-pipeline-pointer guard in C++ + engine-actor boundary on Swift side (D-15) | Inv 4 (native pipeline pointer use-after-free) | UAF crash when teardown zeroes pointer mid-capture |
 | C++ lock ordering `pipeline > stage > consumer` (domain Invariant 5) | Inv 5 | Deadlock at scale; silently-stuck consumer under contention |
 | `OSAllocatedUnfairLock<UniformBuffer>` on the host-written uniform buffer, flushed to the Metal argument buffer per frame | Inv 6 (uniforms protected against concurrent write by slider + GPU-thread read) | Torn reads of per-channel color params → visible artifacts on one frame |
 | Engine-captured `sessionToken` + completion-handler guard (D-10) | Inv 9 (retry no-ops after close — same mechanism), Inv 12 (watchdog / completion-handler no-op when session has advanced) | Use-after-free crashes on readback buffers (G-20); watchdog mutates wrong session's state |
-| `Task` handles stored on `CameraEngine` + `.cancel()` in `close()` / `deinit` (ADR-23) | Inv 9 (recovery retry cancellation), implicit cross-Inv cleanup | Orphan tasks retain the actor indefinitely; pool drains |
+| `Task` handles stored on `CameraEngine` + `.cancel()` in `close()` / `deinit` (ADR-23) | Inv 9 (recovery retry cancellation), Inv 1 (session-state teardown serialization: all engine tasks joined before session token advances) | Orphan tasks retain the actor indefinitely; pool drains |
 
 Every row cites an ADR or introduces a `D-##`. No blank cells.
 
@@ -227,6 +228,6 @@ disappear.
   `05-consumers.md` owns it.
 - Per-frame command buffer construction — `04-metal-pipeline.md` owns it.
 - Watchdog callback bodies — `09-errors-and-recovery.md` owns it. Watchdog timestamp
-  write-from-delivery / read-from-engine is the Inv 11 concern (see row above).
+  write-from-delivery / read-from-engine is the Inv 11 concern (see `ManagedAtomic<UInt64>` stall-timestamp row in the contract table above).
 - UI scenePhase wiring — `08-ui.md` owns it; this file only specifies the engine-side
   sequence (Sequence A).
