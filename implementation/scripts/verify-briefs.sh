@@ -118,4 +118,39 @@ check_m2_arch_anchors() {
 
 check_m2_arch_anchors
 
+check_m3_retire_real() {
+    local index="$STAGES/stage-index.md"
+    local yamls
+    yamls=$(awk '/^---$/{f=!f; if(f)print "---"; next} f' "$index")
+    local introduced
+    introduced=$(echo "$yamls" | yq eval-all '.scaffolding_introduced[]?' - | sort -u)
+
+    local ok=1
+    for brief in "$BRIEFS"/stage-*.md; do
+        [[ -f "$brief" ]] || continue
+        # Extract "Retires scaffolding from: Stage N (slug)" lines.
+        local retirelines
+        retirelines=$(grep -E '^Retires scaffolding from:' "$brief" || true)
+        [[ -z "$retirelines" ]] && continue
+        while IFS= read -r line; do
+            # Parse: "Retires scaffolding from: Stage N (slug)"
+            # Extract N and slug.
+            local n slug
+            n=$(echo "$line" | sed -E 's/^Retires scaffolding from: Stage ([0-9]+).*$/\1/')
+            slug=$(echo "$line" | sed -E 's/.*\((.+)\).*/\1/')
+            # Slug in stage-index is "NN:slug" (zero-padded stage).
+            local padded
+            padded=$(printf '%02d' "$n")
+            local full="${padded}:${slug}"
+            if ! grep -Fxq "$full" <<< "$introduced"; then
+                fail "M3: $brief retires '$full' but stage-index has no such scaffolding_introduced entry"
+                ok=0
+            fi
+        done <<< "$retirelines"
+    done
+    (( ok == 1 )) && pass "M3: every brief's 'Retires scaffolding from' matches a stage-index entry"
+}
+
+check_m3_retire_real
+
 finish
