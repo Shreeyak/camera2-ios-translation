@@ -34,6 +34,39 @@ Build the C++ target as a pure-C++ SPM library target with no Apple-framework
 dependencies in its public headers. This keeps it independently testable via
 `swift test` on the macOS host without standing up a camera, Metal, or AVFoundation.
 
+### Module map: what Swift sees (day-one setup, not a mitigation)
+
+When exporting a Swift-visible `Cpp` module (or equivalent), the module map must
+**not** `umbrella header "opencv2.h"` and must **not** textual-include the OpenCV
+xcframework umbrella. This discipline is a day-one project setup item — it prevents
+a category of unreviewable compile failures that are extremely hard to diagnose after
+the fact.
+
+Allowed `module.modulemap` shape:
+
+```modulemap
+module Cpp {
+    umbrella header "CppPublic.h"    // POD + SHARED_REFERENCE types only; NO opencv2
+    export *
+}
+```
+
+`CppPublic.h` may include only:
+- POD structs
+- Plain classes with `SWIFT_SHARED_REFERENCE` annotations
+- C-ABI function declarations (`extern "C"` blocks)
+- **No `#include <opencv2/...>`** — not even in inline methods.
+
+OpenCV headers are available only in source files that directly `#include` them
+(`.cpp` translation units, non-exported private headers). Because those files are
+not part of the Swift-visible module, Swift compilation never parses them.
+
+**If this discipline is broken** — e.g. `opencv2.hpp` ends up transitively in a
+Swift-visible header — Swift will attempt to parse thousands of OpenCV templates and
+either produce a build failure or a wall of unreviewable compile errors. The failure
+mode is disproportionate to the cause: one stray `#include` can make the entire
+module unimportable with no actionable diagnostic.
+
 ---
 
 ## Importing C++ reference types: SWIFT_SHARED_REFERENCE
@@ -236,6 +269,71 @@ The engine never slows the camera hardware in response to a slow consumer. Drop-
 absorbs the gap. If a consumer is consistently slow (e.g. Canny on full-resolution
 instead of 480p), the fix is to change the input — downscale, strip channels — not
 to introduce a backpressure mechanism.
+
+---
+
+## ADR-31: Swift-subclassing a C++ abstract class via `.interoperabilityMode(.Cxx)` is unproven; spike before design depends on it
+
+The design may be tempted to express a consumer pattern like `PixelSink` as a C++
+class with `virtual = 0` methods, then subclass it in Swift under direct interop. As
+of Swift 6.2, Swift subclassing of C++ abstract classes works for some shapes and
+fails for others — covariant returns, specific ABI alignments, and
+override-across-module-boundaries have sharp edges. This path is not currently a
+stable ABI guarantee.
+
+Before any implementation phase's acceptance criteria depend on Swift-inheriting a
+C++ abstract base, do a throwaway spike:
+
+1. Define a C++ abstract class with one pure-virtual method using the exact shape the
+   design needs.
+2. Subclass it from Swift.
+3. Instantiate the Swift subclass, hand the `PixelSink*` pointer to a C++ function
+   that calls the virtual method, and verify the Swift override is dispatched
+   correctly.
+4. Run under TSan and debug+release builds.
+
+If any step fails, fall back to a **C-ABI callback struct** — a POD `struct` of
+function pointers plus an opaque `void* context`. The C++ side invokes the function
+pointers; the Swift side registers a struct whose function pointers forward into a
+Swift closure via the `Unmanaged.passRetained(context).toOpaque()` dance. This is
+wire-level predictable and avoids the Swift/C++ v-table question entirely.
+
+### C-ABI fallback shape
+
+```cpp
+// C-ABI fallback shape — predictable, no v-table question.
+typedef struct {
+    void (*onFrame)(void* context, const FrameData* frame);
+    void (*onError)(void* context, int32_t code);
+    void* context;
+} PixelSinkCallbacks;
+
+void pixel_sink_register(const PixelSinkCallbacks* cbs);
+```
+
+```swift
+// Swift side
+final class EdgeDetector {
+    private var retainedSelf: Unmanaged<EdgeDetector>?
+    func register() {
+        self.retainedSelf = Unmanaged.passRetained(self)
+        var cbs = PixelSinkCallbacks(
+            onFrame: { ctx, frame in
+                let d = Unmanaged<EdgeDetector>.fromOpaque(ctx!).takeUnretainedValue()
+                d.handle(frame!.pointee)
+            },
+            onError: { ctx, code in /* ... */ },
+            context: self.retainedSelf!.toOpaque()
+        )
+        pixel_sink_register(&cbs)
+    }
+}
+```
+
+Cross-references: ADR-11 (direct interop module-map discipline), ADR-13 (async
+consumers / 1-slot mailbox; includes the C-ABI callback pattern for C++ → Swift
+returns), G-27 (`@unchecked Sendable` silences the diagnostic but not the race —
+applies to the `context: void*` pointer retained via `Unmanaged`).
 
 ---
 
