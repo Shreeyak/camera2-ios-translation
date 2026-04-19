@@ -68,4 +68,54 @@ check_m1_section_headings() {
 
 check_m1_section_headings
 
+check_m2_arch_anchors() {
+    local ok=1
+    for brief in "$BRIEFS"/stage-*.md; do
+        [[ -f "$brief" ]] || continue
+        # Find lines referencing architecture/ files.
+        while IFS= read -r ref; do
+            # Strip bullet '- ' prefix and trailing punctuation.
+            ref=$(echo "$ref" | sed -E 's/^-[[:space:]]+//; s/[[:space:]]*$//')
+            # Form: architecture/FILE.md[#anchor]
+            local file="${ref%%#*}"
+            local anchor=""
+            [[ "$ref" == *"#"* ]] && anchor="${ref#*#}"
+
+            # File must exist under $ARCH/.
+            local path="$ARCH/${file#architecture/}"
+            if [[ ! -f "$path" ]]; then
+                fail "M2: $brief cites missing file: $file"
+                ok=0
+                continue
+            fi
+
+            # If anchor given, verify it exists as a heading.
+            if [[ -n "$anchor" ]]; then
+                # Convert anchor slug back to heading text: roughly '## .*' matching slug.
+                # Check for a heading whose kebab-lowercased text contains the anchor.
+                if ! grep -qE "^#{1,6} " "$path"; then
+                    fail "M2: $brief anchor '#$anchor' in $file: no headings at all"
+                    ok=0
+                    continue
+                fi
+                # Crude match: anchor words joined by '-' should appear in some heading.
+                local found=0
+                while IFS= read -r h; do
+                    # Normalize: lowercase, non-alphanum → '-', collapse dashes.
+                    local slug
+                    slug=$(echo "$h" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' '-' | tr -s '-' | sed -E 's/(^-|-$)//g')
+                    if [[ "$slug" == *"$anchor"* ]]; then found=1; break; fi
+                done < <(grep -E '^#{1,6} ' "$path" | sed 's/^#*[[:space:]]*//')
+                if (( found == 0 )); then
+                    fail "M2: $brief anchor '$file#$anchor' does not resolve"
+                    ok=0
+                fi
+            fi
+        done < <(awk '/^## 5\. Architecture refs/{f=1; next} /^## /{f=0} f && /^-[[:space:]]+architecture\//' "$brief")
+    done
+    (( ok == 1 )) && pass "M2: every architecture ref anchor resolves"
+}
+
+check_m2_arch_anchors
+
 finish
