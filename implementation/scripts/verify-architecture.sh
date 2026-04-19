@@ -89,6 +89,39 @@ check_m3_skeletons_build() {
 
 check_m3_skeletons_build
 
-# M4-M8 added in subsequent tasks
+check_m4_touches_valid() {
+    local index="$STAGES/stage-index.md"
+    [[ -f "$index" ]] || { fail "M4: stage-index.md missing"; return; }
+
+    # Extract YAML blocks (delimited by ---). yq reads multi-doc YAML from stdin.
+    # Strip markdown around the YAML: keep only blocks between ---...---.
+    local yamls
+    yamls=$(awk '/^---$/{f=!f; if(f)print "---"; next} f' "$index")
+
+    # Valid concern file stems (no extension).
+    local valid_stems=(
+        01-system-shape 02-concurrency 03-camera-session 04-metal-pipeline
+        05-consumers 06-capture-and-recording 07-settings 08-ui 09-errors-and-recovery
+    )
+    # Build a regex alternation.
+    local valid_re
+    valid_re=$(IFS='|'; printf '%s' "${valid_stems[*]}")
+
+    local ok=1
+    # Each touches: value is a YAML list. yq returns them joined by newline per document.
+    while IFS= read -r stem; do
+        [[ -z "$stem" ]] && continue
+        if ! [[ "$stem" =~ ^(${valid_re})$ ]]; then
+            fail "M4: stage touches unknown concern file: $stem"
+            ok=0
+        fi
+    done < <(echo "$yamls" | yq eval-all '.touches[]' -)
+
+    (( ok == 1 )) && pass "M4: every stage touches: entry is a valid concern file"
+}
+
+check_m4_touches_valid
+
+# M5-M8 added in subsequent tasks
 
 finish
