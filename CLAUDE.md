@@ -26,7 +26,7 @@ watching the whole tree.
 | 4 ARCHITECTURE REVIEW | `implementation/prompts/agent-4-review.md` | Agent 3 output + mechanical.md | `implementation/review/` (verdict) |
 | 5 BRIEF WRITER | `implementation/prompts/agent-5-brief-writer.md` | Reviewed architecture + stages | `implementation/briefs/` |
 | 5.5 MECHANICAL | `implementation/scripts/verify-briefs.sh` | Agent 5 output | (stdout) |
-| 6 IMPLEMENT | Claude Code (separate repo) | `implementation/briefs/` + `implementation/architecture/` + `ios-platform-guide/` | Swift code + tests + `state.md` |
+| 6 IMPLEMENT | Claude Code (separate repo) | `implementation/briefs/` + `implementation/architecture/` + `domain-revised/` + `ios-platform-guide/` | Swift code + tests + `state.md` |
 
 The Agent 3/4/5 pipeline and its two verify scripts are designed per
 `docs/superpowers/specs/2026-04-19-implementation-pipeline-design.md` and built by
