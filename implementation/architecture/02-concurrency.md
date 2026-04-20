@@ -41,8 +41,8 @@ least one row below. Primitives may enforce multiple invariants.
 | `.bufferingNewest(1)` mailbox (ADR-22) + `.bufferingOldest(STATE_STREAM_BUFFER_SIZE)` for state streams | Inv 3 (UI callbacks on main — consumer side uses `for await` on `@MainActor`), Inv 10 (drop-on-busy mailbox semantics) | Unbounded memory growth; backpressure pushes back into camera producer; missed state transitions |
 | C-ABI `std::atomic<bool>` (capture-requested) and `std::atomic<uint64_t>` (mailbox overwrite count) in C++ `PixelSink` (ADR-13) | Inv 7 (capture in-flight guard via atomic CAS), Inv 8 (lock-free fast-path on every frame), Inv 10 (atomic publish of frame ref into 1-slot mailbox) | Two concurrent captures; frame path acquires a lock; mailbox race drops frames without counter |
 | `std::mutex` native-pipeline-pointer guard in C++ + engine-actor boundary on Swift side (D-15) | Inv 4 (native pipeline pointer use-after-free) | UAF crash when teardown zeroes pointer mid-capture |
-| C++ lock ordering `pipeline > stage > consumer` (domain Invariant 5) | Inv 5 | Deadlock at scale; silently-stuck consumer under contention |
-| `OSAllocatedUnfairLock<UniformBuffer>` on the host-written uniform buffer, flushed to the Metal argument buffer per frame | Inv 6 (uniforms protected against concurrent write by slider + GPU-thread read) | Torn reads of per-channel color params → visible artifacts on one frame |
+| C++ lock ordering `pipeline > stage > consumer` (D-16) | Inv 5 | Deadlock at scale; silently-stuck consumer under contention |
+| `OSAllocatedUnfairLock<UniformBuffer>` on the host-written uniform buffer, flushed to the Metal argument buffer per frame (D-17) | Inv 6 (uniforms protected against concurrent write by slider + GPU-thread read) | Torn reads of per-channel color params → visible artifacts on one frame |
 | Engine-captured `sessionToken` + completion-handler guard (D-10) | Inv 9 (retry no-ops after close — same mechanism), Inv 12 (watchdog / completion-handler no-op when session has advanced) | Use-after-free crashes on readback buffers (G-20); watchdog mutates wrong session's state |
 | `Task` handles stored on `CameraEngine` + `.cancel()` in `close()` / `deinit` (ADR-23) | Inv 9 (recovery retry cancellation), Inv 1 (session-state teardown serialization: all engine tasks joined before session token advances) | Orphan tasks retain the actor indefinitely; pool drains |
 
@@ -184,6 +184,39 @@ The mismatch no-op is silent — it is expected during teardown.
 Minor code change to reverse — the guard is a two-line pattern. Kept as `Consequential`
 because the pattern crosses every GPU completion site (04-metal-pipeline + 06-capture-and-recording
 + 08-ui for the preview blit) and changing it would require editing each call site.
+
+---
+
+## D-16 — C++ lock ordering: pipeline > stage > consumer
+
+Minor. Domain Invariant 5 requires a fixed acquisition order for all native-layer mutexes
+to prevent deadlock. The three-level hierarchy chosen is: `pipeline` lock (outermost,
+guards the `NativePipeline` handle and pool), then `stage` lock (guards per-stage encoding
+state), then `consumer` lock (guards individual `PixelSink` slot). All callsites in the
+C++ imaging core must acquire from outermost to innermost; reverse acquisition is forbidden.
+The hierarchy is the least-constraining order that reflects actual dependency direction —
+a consumer is a leaf node that cannot call back into a stage or pipeline under a live lock.
+No ADR mandates this specific hierarchy; D-16 records the choice so future C++ additions
+can locate the constraint rather than discovering it through a deadlock.
+
+---
+
+## D-17 — `OSAllocatedUnfairLock` for host-written uniform buffer
+
+Minor. Domain Invariant 6 requires the host-written uniform buffer (per-channel color
+parameters, updated by the slider on `@MainActor`) to be safe against concurrent reads
+from the `delivery` queue GPU thread. Three alternatives were considered:
+
+- **Actor isolation** (`CameraEngine` actor): requires a `Task` hop on every slider move
+  (G-03); unacceptable on the hot path at `constants.md#FRAME_LATENCY_BUDGET_MS`.
+- **Serial `DispatchQueue`**: adds a queue hop per slider move; same latency concern.
+- **`OSAllocatedUnfairLock<UniformBuffer>`**: real-time-safe, priority-inversion free
+  (POSIX `os_unfair_lock` semantics, ADR-09 §Hot-path primitives); no hop required — the
+  slider writer acquires inline before updating the struct and releases immediately.
+
+`OSAllocatedUnfairLock` is the choice. The lock is held for < 1 µs (struct copy only);
+starvation risk is negligible. Cite `constants.md#FRAME_LATENCY_BUDGET_MS` for the
+budget that rules out queue-hop alternatives.
 
 ---
 

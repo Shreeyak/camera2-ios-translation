@@ -101,11 +101,16 @@ allowed shape tags — `concurrency×lifecycle`, `storage×consumer`, `error×re
   enforces coupling. Rule 3 (manual latches from last readback) depends on the
   `DeviceStateSnapshot` stream's most-recent value, updated via KVO per `02-concurrency.md`
   §KVO → AsyncStream adapter. Shape: `settings×session`.
-- **ui×state**: `frameResultStream` × `focusDistance == nil` × UI scanning indicator. The
-  UI binds `liveFrameResult.focusDistance` directly; the domain specifies `nil` whenever
-  the autofocus is actively scanning (domain 09 §FrameResult Display). A scanning animation
-  replaces the numeric value while `nil`. The nil-vs-numeric transition is a state-shape
-  dependency — UI code must handle both without showing stale values. Shape: `ui×state`.
+- **ui×state**: `frameResultStream.bufferingNewest(1)` (ADR-22 drop semantics) ×
+  `focusDistance == nil` (domain 09 §FrameResult Display). When the UI consumer misses a
+  frame due to mailbox overwrite, it retains the prior `liveFrameResult`. If the prior
+  result had a numeric `focusDistance` and autofocus began scanning during the skipped
+  frame, the binding shows a stale numeric value rather than `nil` — the scanning animation
+  never appears for that transition. This failure mode requires both the drop-semantics
+  contract (ADR-22) AND the nil-semantics contract (domain 09) simultaneously; either alone
+  does not surface the bug. Fix: bind the scanning indicator to the engine's `SessionState`
+  or a dedicated `isAdjustingFocus` field rather than to `focusDistance` nilness.
+  Shape: `ui×state`.
 
 ## Phase coverage table
 
@@ -121,7 +126,7 @@ numbers reference `../stages/stage-index.md`.
 | 05-resource-lifecycle.md | 03-camera-session, 09-errors-and-recovery | 02, 03, 06, 07, 09, 12 |
 | 06-error-and-recovery.md | 09-errors-and-recovery | 02, 09, 12 |
 | 07-performance-budgets.md | 04-metal-pipeline, 09-errors-and-recovery | 04, 09 |
-| 08-capture-and-recording.md | 06-capture-and-recording | 06, 07 |
+| 08-capture-and-recording.md | 06-capture-and-recording | 07, 10, 12 |
 | 09-ui-behaviors.md | 08-ui | 01, 02, 04, 10, 11 |
 | 10-api-contract.md | 01-system-shape, api-surface.md | 01, 03, 06, 07, 08, 11 |
 | 11-what-not-to-port.md | all (excluded items) | n/a |

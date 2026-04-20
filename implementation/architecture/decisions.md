@@ -33,6 +33,8 @@ only (see `README.md` §Primary-owner rule); other concerns cross-reference.
 | D-13 | Recovery step 1 is watchdog-disarm *before* any state transition; a watchdog callback that outraces teardown no-ops via captured session-token identity. | domain 06-error-and-recovery §Non-Fatal Recovery Sequence, Invariant 12 | Minor | 09-errors-and-recovery.md |
 | D-14 | Self-healing from `CAMERA_IN_USE` uses `AVCaptureSessionInterruptionEnded` with reason `videoDeviceInUseByAnotherClient` to return the engine to `"closed"`; re-entry to `"streaming"` requires an explicit host `open()`. | ADR-08, guide 04-avfoundation §Interruption reasons, domain 06 §Self-Healing | Minor | 09-errors-and-recovery.md |
 | D-15 | Pipeline-pointer guard (domain Invariant 4) is a Swift actor boundary on the engine side plus a C++ `std::mutex` on the native side; the native `getNativePipelineHandle()` returns the raw pointer only while holding the engine actor. | domain Invariant 4, ADR-02, ADR-11 | Minor | 05-consumers.md |
+| D-16 | C++ lock ordering `pipeline > stage > consumer` (three-level hierarchy) is the canonical ordering for all native-layer mutexes; callers must acquire from outermost to innermost. | domain Invariant 5, ADR-11 | Minor | 02-concurrency.md |
+| D-17 | `OSAllocatedUnfairLock<UniformBuffer>` guards the host-written uniform buffer on the hot per-frame write path; actor isolation and `DispatchQueue` alternatives are excluded because they require a `Task` hop on every slider move, which exceeds the frame-latency budget (`constants.md#FRAME_LATENCY_BUDGET_MS`). | ADR-09, domain Invariant 6 | Minor | 02-concurrency.md |
 
 ---
 

@@ -276,8 +276,8 @@ except as the "non-fatal notification" channel for `FPS_DEGRADED` etc.
 ## Quality gate (G-26 avoidance)
 
 Every `PixelSink` registration must supply an `onOverwrite` callback (the second function
-pointer in `PixelSinkCallbacks`). The registry rejects registrations lacking it with
-`EngineError.interop(.pixelSinkRegistrationRejected)`. This prevents a consumer from
+pointer in `PixelSinkCallbacks`), per D-11. The registry rejects registrations lacking it
+with `EngineError.interop(.pixelSinkRegistrationRejected)`. This prevents a consumer from
 silently degrading under thermal load (G-26) because absence-of-counter is visible at
 registration time, not at runtime.
 
