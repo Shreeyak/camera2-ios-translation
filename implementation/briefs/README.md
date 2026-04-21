@@ -1,5 +1,12 @@
 # Briefs — implementation-stage corpus
 
+## Contents
+
+- `stage-01.md` … `stage-12.md` — twelve per-stage briefs, 12-section schema each. Authoritative spec for the stage an agent is implementing.
+- `state-template.md` — initial `state.md` shape. Claude Code seeds `CameraKit/state.md` from this at Stage 01.
+- `EXPECTATIONS.md` — human-facing per-stage verification guide. Distills each stage's "What you'll see / How to verify / Regression signals" from the briefs' §3 / §8 / §10 / §11, written for a reviewer who is not going to open the full brief. Use this for PR review and device walkthroughs; it is not a substitute for the brief when implementing.
+- `README.md` — this file.
+
 ## Source of truth
 
 For stage N, your current brief (`stage-NN.md`) is the authoritative source for this stage. If the brief references an architecture anchor or domain section, read it. If a prior brief or the architecture appears to contradict the current brief, the current brief wins — note the conflict in `state.md` under "Decisions taken that weren't in briefs" and proceed with the current brief.

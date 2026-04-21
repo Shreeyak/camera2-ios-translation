@@ -46,7 +46,7 @@ Open a fresh Claude Code session in this directory, then paste each prompt file 
 4. Paste `implementation/prompts/agent-3-architect.md` → verify `implementation/architecture/` + `implementation/stages/` populated, run `./implementation/scripts/verify-architecture.sh implementation/`
 5. Paste `implementation/prompts/agent-4-review.md` → read `implementation/review/README.md` for Green/Yellow/Red verdict
 6. Paste `implementation/prompts/agent-5-brief-writer.md` → verify `implementation/briefs/` populated, run `./implementation/scripts/verify-briefs.sh implementation/`
-7. Hand `implementation/briefs/` + `implementation/architecture/` + `ios-platform-guide/` to Claude Code in a separate Swift repo for the per-stage implementation
+7. Hand `implementation/briefs/` + `implementation/architecture/` + `domain-revised/` + `ios-platform-guide/` to Claude Code in a separate Swift repo for the per-stage implementation
 
 ---
 
@@ -161,7 +161,10 @@ After each agent, run these checks before proceeding:
 ✅ Pipeline implemented and committed (Agents 1-5 + two verify scripts)
 ✅ `ios-platform-guide/` authored and reviewed
 ✅ `domain-revised/` reviewed and committed
-⏳ Agent 3/4/5 not yet run end-to-end — `implementation/architecture/`, `stages/`, `review/`, `briefs/` are empty
-⏳ Downstream Swift repo not yet started
+✅ Agent 3 landed — `implementation/architecture/` + `implementation/stages/` populated; `verify-architecture.sh` M1–M8 PASS
+✅ Agent 4 landed — `implementation/review/` shows **Verdict: Green** on iteration 3 (J1–J5 PASS)
+✅ Agent 5 landed — `implementation/briefs/` populated with 12 stage briefs + README + state-template; `verify-briefs.sh` M1–M5 PASS
+✅ Consumer-side artifacts — `implementation/briefs/EXPECTATIONS.md` (human-facing per-stage verification guide) + `implementation/building-prompts/` (session prompts for Stage 01, Stage 02, and target-repo CLAUDE.md)
+⏳ Downstream Swift repo (`eva-swift-stitch`) — Stage 01 in progress; scaffolds not yet landed on the implementation side
 
-**Next action**: Run Agent 3 against `domain-revised/` + `ios-platform-guide/`, then the verify scripts, then Agents 4 and 5.
+**Next action**: In the downstream repo, run the Stage 01 prompt from `implementation/building-prompts/stage-01-implementation.md`, then Stage 02, committing between stages. Each stage's exit is gated on its brief's §10 acceptance criteria + `EXPECTATIONS.md` device walk.

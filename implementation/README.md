@@ -11,7 +11,8 @@ Designed per `docs/superpowers/specs/2026-04-19-implementation-pipeline-design.m
 - `architecture/` — Agent 3 output. 9 concern files + 4 register files + api-skeletons SwiftPM target.
 - `stages/` — Agent 3 output. `stage-index.md` with YAML frontmatter per stage.
 - `review/` — Agent 4 output. Green/Yellow/Red verdict + findings.
-- `briefs/` — Agent 5 output. `stage-NN.md` corpus + `state-template.md` + `README.md`.
+- `briefs/` — Agent 5 output. `stage-NN.md` corpus + `state-template.md` + `README.md` + `EXPECTATIONS.md` (human-facing per-stage verification guide).
+- `building-prompts/` — session-boot prompts for the downstream Swift repo (Stage 01 / Stage 02 implementation, plus target-repo CLAUDE.md rewrite). Consumed by a fresh Claude Code session running in the implementation repo.
 
 ## Pipeline run order
 
@@ -20,7 +21,7 @@ Designed per `docs/superpowers/specs/2026-04-19-implementation-pipeline-design.m
 3. Agent 4 runs judgement-level review J1-J5; emits verdict in `review/`. Must be Green before Agent 5.
 4. Agent 5 produces `briefs/`.
 5. `scripts/verify-briefs.sh` runs mechanical checks M1-M5.
-6. Claude Code (separate repo) consumes `briefs/` + reads `architecture/` and `ios-platform-guide/` as external reference.
+6. Claude Code (separate repo) consumes `briefs/` + reads `architecture/`, `domain-revised/`, and `ios-platform-guide/` as external reference.
 
 
 ## Simple explanation
@@ -67,7 +68,8 @@ Here's what was built in implementation/ — in plain terms.
   - implementation/scripts/ — two bash scripts (verify-architecture.sh, verify-briefs.sh) plus shared helpers. They're "grep-based test suites" for the agent outputs.
   - implementation/scripts/fixtures/ — tiny example directories used to test the scripts. One "good" example that should pass every check, plus one "bad" example per check that should fail just that one
   check (TDD).
-  - implementation/architecture/, stages/, review/, briefs/ — empty dirs waiting for the pipeline to run and fill them.
+  - implementation/architecture/, stages/, review/, briefs/ — populated by the pipeline. `architecture/` holds the 9 concern files + 4 register files + the compiling Swift skeleton; `stages/stage-index.md` is the 12-stage ordered walk; `review/` carries the Green verdict; `briefs/` carries the 12 per-stage implementation briefs + `EXPECTATIONS.md`.
+  - implementation/building-prompts/ — consumer-side session-boot prompts for the downstream Swift repo.
 
   The clever bits
 
