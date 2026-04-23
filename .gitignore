@@ -6,3 +6,4 @@ tmp/
 .claude/remember/
 **/.build/
 **/.swiftpm/
+.worktrees/
