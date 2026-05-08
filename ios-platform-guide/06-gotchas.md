@@ -44,6 +44,7 @@ crash or silently degrade an app if missed.
 | G-32 | `MTLBlitCommandEncoder.copy(from:to:)` does not perform pixel-format conversion — the source and destination textures must share `pixelFormat`. A common mistake is blitting an RGBA16F working texture directly to a BGRA8 MTKView drawable; the call will assert at encoder-encode time (or on newer OS versions, render black). | Any pass that changes pixel format is a render or compute pass. Either keep the working format to the drawable (configure `MTKView.colorPixelFormat = .rgba16Float` and let the system tone-map) or add a final render/compute pass that reads RGBA16F and writes BGRA8 before presenting. Pure blit passes are appropriate only for same-format copies (e.g., natural → processed staging). |
 | G-33 | Unlabeled `MTLCommandBuffer`s and un-bracketed encoder work produce opaque Xcode GPU captures — every pass is named "Command Buffer 1", every draw "Render Encoder" — which makes shader debugging slow. | Label every command buffer per frame: `commandBuffer.label = "frame.\(frameIndex).pass\(passId)"`. Wrap each encoder's work in `encoder.pushDebugGroup("naturalToProcessed")` / `popDebugGroup()`. The names appear in Xcode's GPU capture navigator and in Instruments' Metal System Trace. Zero runtime cost in release builds. |
 | G-34 | `IOSurfaceGetBytesPerRow(surface)` may exceed `width * bytes_per_pixel` due to hardware alignment padding (typically 64- or 128-byte row alignment). Constructing `cv::Mat(height, width, type, basePtr)` without the stride argument assumes tight packing; on a padded IOSurface the resulting `cv::Mat` will misread every row beyond the first. | Always pass the stride: `cv::Mat m(h, w, CV_16FC4, basePtr, IOSurfaceGetBytesPerRow(surface))`. Subsequent `cvtColor`, `resize`, and other OpenCV operations handle stride-padded source matrices correctly; only the initial view construction is the trap. Do not attempt to strip the padding into a new buffer — the view cost is zero, the copy cost is per-frame wasted bandwidth. |
+| G-35 | When returning from background, iOS transitions `.background → .inactive → .active` — never `.background → .active` directly. Code that checks `previousPhase == .background` at the `.active` site always sees `.inactive` instead; the backgroundResume path is silently skipped, leaving the session stopped until the stall watchdog fires. | Track a `cameFromBackground: Bool` flag — set it on `.background`, check-and-clear it on `.active`. Do not use `previousPhase` to distinguish a background-return from a notification-dismiss. Expected side-effect: AVFoundation reinitializes auto-exposure on every `startRunning()`, producing a brief brightness shift (~260ms) on the first live frame. |
 
 ---
 
@@ -51,14 +52,15 @@ crash or silently degrade an app if missed.
 
 | scenePhase | Triggers on | Action |
 |---|---|---|
-| `.active` | Foreground, receiving events | Resume GPU gate, start streaming |
+| `.active` | Foreground, receiving events | Resume GPU gate; if `cameFromBackground` flag is set, call `startRunning()` and clear flag |
 | `.inactive` | App switcher, notification banner, incoming call, Control Center | **Gate GPU**, do not stop session |
-| `.background` | Fully off-screen | Stop session via `sessionQueue` |
+| `.background` | Fully off-screen | Set `cameFromBackground = true`; stop session via `sessionQueue` |
 
 - `UIApplicationDelegate.applicationWillResignActive` ≈ `.inactive`
 - `UIApplicationDelegate.applicationDidEnterBackground` ≈ `.background`
+- Return from background always goes `.background → .inactive → .active`; the `.inactive` hop is not a new interruption, so do not re-close the gate there.
 
-Full treatment in `02-concurrency.md` ADR-08, ADR-09.
+Full treatment in `02-concurrency.md` ADR-08, ADR-09. See G-35.
 
 ---
 

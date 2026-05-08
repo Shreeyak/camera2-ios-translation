@@ -115,15 +115,16 @@ CameraEngine.setProcessingParameters(_ params: ProcessingParameters)
 ### Processing order
 
 Applied sequentially in the Pass 2 compute kernel per `04-metal-pipeline.md` §Command graph
-step 4 and domain 03 §GPU Color Processing Parameters:
+step 4. Order departs from the Android-source chain recorded in domain 03 §GPU Color
+Processing Parameters; black balance applies last instead of first per **D-18** below.
 
-1. Black balance — subtract `blackR`, `blackG`, `blackB` per channel; rescale to `[0, 1]`.
-2. Brightness — piecewise formula; positive branch power curve, negative branch linear
+1. Brightness — piecewise formula; positive branch power curve, negative branch linear
    scale.
-3. Contrast — piecewise sigmoid around 0.5 midpoint.
-4. Saturation — luma-based mixing using `constants.md#COLOR_LUMA_WEIGHT_R / _G / _B` in
+2. Contrast — piecewise sigmoid around 0.5 midpoint.
+3. Saturation — luma-based mixing using `constants.md#COLOR_LUMA_WEIGHT_R / _G / _B` in
    RGBA channel order (G-18).
-5. Gamma — power law `output = input^(1/gamma)`, gamma clamped at `> 0.0`.
+4. Gamma — power law `output = input^(1/gamma)`, gamma clamped at `> 0.0`.
+5. Black balance — subtract `blackR`, `blackG`, `blackB` per channel; clamp to `[0, 1]`.
 
 ### Update path
 
@@ -227,3 +228,51 @@ Per domain 10 §CameraSettings + §ErrorCode, `SETTINGS_CONFLICT` covers:
 reason; the error surfaces as `ErrorCode.settingsConflict` on `errorStream` only if the
 caller re-raises through the UI — `SETTINGS_CONFLICT` is a synchronous rejection per domain
 06 §Synchronous call rejection, not a state-machine event.
+
+---
+
+## D-18 — Black balance applied last (post-gamma)
+
+Consequential. Owning file: `07-settings.md` (this file). Cross-references
+`04-metal-pipeline.md` §Command graph step 4.
+
+### Context
+
+`domain-revised/03-camera-control.md` §GPU Color Processing Parameters records the Android
+source as applying black balance first (BB → Br → Co → Sa → Ga). The motivation in the
+source pipeline is that BB acts as a sensor-floor offset on linear capture data prior to
+color-space work. In this architecture, Pass 1 (`04-metal-pipeline.md` §Passes) hands Pass
+2 a YUV→RGB-converted signal already in `[0, 1]` working RGBA16F, so the linear-sensor-data
+assumption that motivates source-order BB does not apply.
+
+### Options
+
+1. Match the Android source: BB → Br → Co → Sa → Ga. Faithful to the upstream shader;
+   preserves the "subtract sensor-floor offset before color work" intent that no longer
+   matches this pipeline's Pass 1 output.
+2. BB last: Br → Co → Sa → Ga → BB. Treats `blackR/G/B` as a final-stage per-channel
+   offset on the display-encoded signal.
+
+### Decision
+
+Option 2. Pass 2 applies BB after gamma as a per-channel post-grading offset; the four
+BCSG steps run on the working RGBA16F signal first, then BB subtracts and clamps to
+`[0, 1]`. `blackR/G/B` API shape, range, and persistence schema are unchanged
+(§ProcessingParameters table); only the order in which the shader applies them differs.
+
+### Consequences
+
+- §Black-balance calibrate UI math operates on the post-gamma signal. Calibration values
+  computed under the source-order chain are not numerically portable; the calibration flow
+  re-samples and re-computes from current frames, so no migration step is required.
+- Domain ↔ architecture order divergence is recorded only in this D-## entry;
+  `domain-revised/03-camera-control.md` remains the faithful description of the Android
+  source.
+- `04-metal-pipeline.md` §Command graph step 4 cites this D-## as the authority for shader
+  order.
+
+### Reversibility
+
+Single-line shader-step reorder; no impact on `ProcessingParameters` shape, persistence
+schema, or UI surface. Reverting requires invalidating any persisted `blackR/G/B` produced
+under the divergent chain (calibration re-run by the user).

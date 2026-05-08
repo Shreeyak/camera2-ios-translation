@@ -35,6 +35,7 @@ only (see `README.md` §Primary-owner rule); other concerns cross-reference.
 | D-15 | Pipeline-pointer guard (domain Invariant 4) is a Swift actor boundary on the engine side plus a C++ `std::mutex` on the native side; the native `getNativePipelineHandle()` returns the raw pointer only while holding the engine actor. | domain Invariant 4, ADR-02, ADR-11 | Minor | 05-consumers.md |
 | D-16 | C++ lock ordering `pipeline > stage > consumer` (three-level hierarchy) is the canonical ordering for all native-layer mutexes; callers must acquire from outermost to innermost. | domain Invariant 5, ADR-11 | Minor | 02-concurrency.md |
 | D-17 | `OSAllocatedUnfairLock<UniformBuffer>` guards the host-written uniform buffer on the hot per-frame write path; actor isolation and `DispatchQueue` alternatives are excluded because they require a `Task` hop on every slider move, which exceeds the frame-latency budget (`constants.md#FRAME_LATENCY_BUDGET_MS`). | ADR-09, domain Invariant 6 | Minor | 02-concurrency.md |
+| D-18 | Black balance applied last (post-gamma) instead of first; reverses the Android-source order recorded in domain 03 §GPU Color Processing Parameters. Pass 1 hands Pass 2 a YUV→RGB signal already in `[0, 1]`, so source-order BB's sensor-floor-subtraction motivation no longer applies. | domain 03 §GPU Color Processing Parameters | Consequential | 07-settings.md |
 
 ---
 
@@ -64,3 +65,11 @@ See `02-concurrency.md` §Completion-handler re-entrancy guard (D-10) for the fu
 entry. Without this guard, an in-flight GPU completion handler can touch actor state that was
 released by `close()`/`backgroundSuspend()`/`setResolution()` between `commit()` and handler
 firing (G-20).
+
+## D-18 summary
+
+See `07-settings.md` §D-18 — Black balance applied last (post-gamma) for the full ADR-form
+entry. Pass 2 receives a YUV→RGB signal already in `[0, 1]` from Pass 1, so the source-order
+"BB subtracts sensor floor before color work" framing no longer matches this pipeline; BB
+runs as a final per-channel offset on the post-gamma signal instead. Domain-revised remains
+the faithful description of the Android source order.

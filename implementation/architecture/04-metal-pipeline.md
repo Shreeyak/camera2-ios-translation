@@ -30,8 +30,8 @@ graph`. This file states the product-specific choices layered onto that graph, n
    from the engine's current `cropRegion`. BT.709 coefficients (full-range matching capture
    format).
 4. **Pass 2** (compute): color transforms → `processedTex` (also mirrored to
-   `processedPoolBuf`). Shader order per `07-settings.md` §Processing order:
-   black balance → brightness → contrast → saturation → gamma.
+   `processedPoolBuf`). Shader order per `07-settings.md` §Processing order (D-18):
+   brightness → contrast → saturation → gamma → black balance.
 5. **Pass 3** (blit): `naturalTex → naturalMTKView.currentDrawable`. Single
    `MTLBlitCommandEncoder` because formats match (G-32 satisfied — no format change).
 6. **Pass 4** (compute, gated on tracker subscribers): downsample `processedTex` →
